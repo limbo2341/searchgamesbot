@@ -28,3 +28,11 @@ class PaymentStates(StatesGroup):
     choosing_tariff = State()
     choosing_method = State()
     waiting_for_screenshot = State()
+
+
+class AIChatStates(StatesGroup):
+    chatting = State()
+
+
+class BotControlStates(StatesGroup):
+    waiting_for_disable_reason = State()
