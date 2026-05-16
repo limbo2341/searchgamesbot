@@ -9,6 +9,6 @@ structlog==24.4.0
 apscheduler==3.10.4
 Pillow==11.0.0
 aiofiles==24.1.0
-pydantic==2.10.3
+pydantic>=2.4.1,<2.10
 pydantic-settings==2.6.1
 greenlet==3.1.1
