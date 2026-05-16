@@ -15,9 +15,10 @@ class Settings(BaseSettings):
     redis_url: str = Field(..., env="REDIS_URL")
 
     # APIs
-    openrouter_api_key: str = Field(..., env="OPENROUTER_API_KEY")
+    openrouter_api_key: str = Field("", env="OPENROUTER_API_KEY")
     rawg_api_key: str = Field(..., env="RAWG_API_KEY")
     openrouter_model: str = Field("google/gemini-flash-1.5", env="OPENROUTER_MODEL")
+    gemini_api_key: str = Field("", env="GEMINI_API_KEY")
 
     # Payments
     privat_card: str = Field(..., env="PRIVAT_CARD")
