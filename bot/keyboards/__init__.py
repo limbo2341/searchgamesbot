@@ -12,6 +12,9 @@ from .keyboards import (
     settings_keyboard,
     referral_keyboard,
     favorites_keyboard,
+    bot_disable_confirm_keyboard,
+    ai_chat_keyboard,
+    upgrade_premium_keyboard,
 )
 
 __all__ = [
@@ -28,4 +31,7 @@ __all__ = [
     "settings_keyboard",
     "referral_keyboard",
     "favorites_keyboard",
+    "bot_disable_confirm_keyboard",
+    "ai_chat_keyboard",
+    "upgrade_premium_keyboard",
 ]
