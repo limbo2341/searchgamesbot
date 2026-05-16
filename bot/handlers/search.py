@@ -1,3 +1,14 @@
+"""
+search.py — Хендлер пошуку з інтерактивним діалогом «Детектив-геймер».
+
+Логіка:
+  1. Користувач натискає «Знайти гру» → вводить опис.
+  2. AI аналізує і або повертає гру, або ставить уточнюючі питання.
+  3. Відповіді записуються у FSM (conversation_history), знову подаються AI.
+  4. Цикл триває поки AI не впевнений ≥90% АБО не досягнуто MAX_ROUNDS.
+  5. Після визначення гри — пошук у RAWG і виведення карток.
+"""
+
 import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -6,7 +17,8 @@ from aiogram.fsm.context import FSMContext
 from bot.config import settings
 from bot.database import async_session_maker
 from bot.repositories import UserRepository, SearchHistoryRepository, FavoriteRepository
-from bot.services import analyze_game_description, search_games, format_game_card
+from bot.services import search_games, format_game_card
+from bot.services.ai_service import detective_analyze
 from bot.locales import t
 from bot.keyboards import back_keyboard, game_result_keyboard, main_menu_keyboard
 from bot.states import SearchStates
@@ -14,8 +26,18 @@ from bot.states import SearchStates
 logger = logging.getLogger(__name__)
 router = Router()
 
-ALL_BACK_TEXTS = ["← Back", "← Назад", "← Назад", "🏠 Main Menu", "🏠 Головне меню", "🏠 Главное меню"]
+# Максимум раундів уточнень щоб не зациклитись
+MAX_CLARIFICATION_ROUNDS = 5
 
+ALL_BACK_TEXTS = [
+    "← Back", "← Назад", "← Назад",
+    "🏠 Main Menu", "🏠 Головне меню", "🏠 Главное меню",
+]
+
+
+# ──────────────────────────────────────────────
+# Допоміжні функції
+# ──────────────────────────────────────────────
 
 async def get_user_lang(telegram_id: int) -> str:
     async with async_session_maker() as session:
@@ -39,6 +61,69 @@ async def send_to_main_menu(message: Message, state: FSMContext):
     )
 
 
+async def _show_games(
+    message: Message,
+    state: FSMContext,
+    games: list,
+    lang: str,
+    query: str,
+    keywords: list,
+    genres: list,
+):
+    """Вивести картки знайдених ігор."""
+    await state.update_data(
+        query=query,
+        keywords=keywords,
+        genres=genres,
+        current_page=1,
+    )
+
+    async with async_session_maker() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        history_repo = SearchHistoryRepository(session)
+        await history_repo.add(
+            user_id=user.id,
+            search_query=query,
+            result_game=games[0]["name"] if games else None,
+        )
+
+    await state.set_state(SearchStates.showing_results)
+
+    for game in games[:5]:
+        card_text = format_game_card(game, lang)
+        async with async_session_maker() as session:
+            user_repo = UserRepository(session)
+            fav_repo = FavoriteRepository(session)
+            user = await user_repo.get_by_telegram_id(message.from_user.id)
+            is_fav = await fav_repo.is_favorite(user.id, game["id"])
+
+        keyboard = game_result_keyboard(
+            game_id=game["id"],
+            game_name=game["name"],
+            language=lang,
+            is_favorite=is_fav,
+            page=1,
+        )
+
+        if game.get("background_image"):
+            try:
+                await message.answer_photo(
+                    photo=game["background_image"],
+                    caption=card_text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+                continue
+            except Exception:
+                pass
+        await message.answer(card_text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────
+# Вхід у пошук
+# ──────────────────────────────────────────────
+
 @router.message(F.text.in_(["🔍 Find a Game", "🔍 Найти игру", "🔍 Знайти гру"]))
 async def search_menu(message: Message, state: FSMContext):
     await state.clear()
@@ -57,12 +142,10 @@ async def search_menu(message: Message, state: FSMContext):
         )
         return
 
-    searches_used = user.daily_search_count if user else 0
-    remaining = max(0, settings.free_daily_searches - searches_used)
-
     if not (user and user.premium_status):
-        info = t("searches_left", lang, count=remaining)
-        await message.answer(info, parse_mode="HTML")
+        searches_used = user.daily_search_count if user else 0
+        remaining = max(0, settings.free_daily_searches - searches_used)
+        await message.answer(t("searches_left", lang, count=remaining), parse_mode="HTML")
 
     await state.set_state(SearchStates.waiting_for_description)
     await message.answer(
@@ -71,6 +154,10 @@ async def search_menu(message: Message, state: FSMContext):
         parse_mode="HTML",
     )
 
+
+# ──────────────────────────────────────────────
+# Перший опис від користувача
+# ──────────────────────────────────────────────
 
 @router.message(SearchStates.waiting_for_description)
 async def process_search(message: Message, state: FSMContext):
@@ -82,11 +169,10 @@ async def process_search(message: Message, state: FSMContext):
 
     query = message.text.strip()
     if len(query) < 3:
-        await message.answer("Please write at least 3 characters.")
+        await message.answer("✍️ Напиши хоча б 3 символи." if lang == "ua" else "✍️ Please write at least 3 characters.")
         return
 
-    searching_msg = await message.answer(t("search_searching", lang))
-
+    # Перевірка ліміту пошуку
     async with async_session_maker() as session:
         user_repo = UserRepository(session)
         user = await user_repo.get_by_telegram_id(message.from_user.id)
@@ -94,7 +180,6 @@ async def process_search(message: Message, state: FSMContext):
         can_search = is_premium or await user_repo.can_search(message.from_user.id, settings.free_daily_searches)
 
         if not can_search:
-            await searching_msg.delete()
             await message.answer(
                 t("search_limit_reached", lang),
                 reply_markup=main_menu_keyboard(lang, is_admin=message.from_user.id in settings.admin_ids),
@@ -106,96 +191,133 @@ async def process_search(message: Message, state: FSMContext):
         if not is_premium:
             await user_repo.increment_search_count(message.from_user.id)
 
-    try:
-        ai_result = await analyze_game_description(query, lang)
-        keywords = ai_result.get("keywords", [query])
-        genres = ai_result.get("genres", [])
-        possible_game = ai_result.get("description", "")
+    thinking_msg = await message.answer(_thinking_text(lang))
 
-        # Try direct game name first if AI is confident
-        if ai_result.get("confidence", 0) > 0.7 and possible_game:
-            keywords = [possible_game] + keywords
+    # Ініціалізуємо історію діалогу
+    history = [{"role": "user", "content": query}]
+    ai_result = await detective_analyze(history, lang)
 
-        games = await search_games(keywords, genres, page=1)
+    await thinking_msg.delete()
 
-        # If no results, try with just the raw query
-        if not games:
-            games = await search_games([query], [], page=1)
-
-        if not games:
-            await searching_msg.delete()
-            await message.answer(t("search_no_results", lang))
-            return
-
+    if ai_result.get("clarification_needed") and ai_result.get("detective_message"):
+        # AI хоче уточнити — зберігаємо стан і чекаємо відповіді
         await state.update_data(
-            query=query,
-            keywords=keywords,
-            genres=genres,
-            current_page=1,
+            original_query=query,
+            conversation_history=history,
+            clarification_round=1,
         )
+        await state.set_state(SearchStates.clarifying)
+        await message.answer(
+            f"🕵️ {ai_result['detective_message']}",
+            reply_markup=back_keyboard(lang),
+            parse_mode="HTML",
+        )
+    else:
+        # AI одразу впевнений — шукаємо
+        await _do_search(message, state, ai_result, query, lang)
 
-        async with async_session_maker() as session:
-            user_repo = UserRepository(session)
-            user = await user_repo.get_by_telegram_id(message.from_user.id)
-            history_repo = SearchHistoryRepository(session)
-            await history_repo.add(
-                user_id=user.id,
-                search_query=query,
-                result_game=games[0]["name"] if games else None,
+
+# ──────────────────────────────────────────────
+# Відповідь на уточнюючі питання (цикл)
+# ──────────────────────────────────────────────
+
+@router.message(SearchStates.clarifying)
+async def process_clarification(message: Message, state: FSMContext):
+    lang = await get_user_lang(message.from_user.id)
+
+    if message.text in ALL_BACK_TEXTS or message.text in [t("btn_back", lang), t("btn_main_menu", lang)]:
+        await send_to_main_menu(message, state)
+        return
+
+    data = await state.get_data()
+    history: list = data.get("conversation_history", [])
+    original_query: str = data.get("original_query", message.text)
+    round_num: int = data.get("clarification_round", 1)
+
+    # Дописуємо останню відповідь AI як "assistant" і нову відповідь юзера
+    # (history вже містить усе до цього моменту)
+    history.append({"role": "user", "content": message.text.strip()})
+
+    thinking_msg = await message.answer(_thinking_text(lang))
+    ai_result = await detective_analyze(history, lang)
+    await thinking_msg.delete()
+
+    if ai_result.get("clarification_needed") and round_num < MAX_CLARIFICATION_ROUNDS:
+        # Ще не впевнений — зберігаємо assistant-повідомлення і продовжуємо
+        history.append({
+            "role": "assistant",
+            "content": ai_result.get("detective_message", ""),
+        })
+        await state.update_data(
+            conversation_history=history,
+            clarification_round=round_num + 1,
+        )
+        await message.answer(
+            f"🕵️ {ai_result['detective_message']}",
+            reply_markup=back_keyboard(lang),
+            parse_mode="HTML",
+        )
+    else:
+        # Впевнений або вичерпали раунди — шукаємо
+        if ai_result.get("detective_message") and not ai_result.get("clarification_needed"):
+            await message.answer(
+                f"🎯 {ai_result['detective_message']}",
+                parse_mode="HTML",
             )
+        await _do_search(message, state, ai_result, original_query, lang)
 
-        await searching_msg.delete()
-        await state.set_state(SearchStates.showing_results)
 
-        for i, game in enumerate(games[:5], 1):
-            card_text = format_game_card(game, lang)
-            async with async_session_maker() as session:
-                user_repo = UserRepository(session)
-                fav_repo = FavoriteRepository(session)
-                user = await user_repo.get_by_telegram_id(message.from_user.id)
-                is_fav = await fav_repo.is_favorite(user.id, game["id"])
+# ──────────────────────────────────────────────
+# Фінальний пошук після ідентифікації
+# ──────────────────────────────────────────────
 
-            keyboard = game_result_keyboard(
-                game_id=game["id"],
-                game_name=game["name"],
-                language=lang,
-                is_favorite=is_fav,
-                page=1,
-            )
+async def _do_search(
+    message: Message,
+    state: FSMContext,
+    ai_result: dict,
+    original_query: str,
+    lang: str,
+):
+    searching_msg = await message.answer(t("search_searching", lang))
 
-            if game.get("background_image"):
-                try:
-                    await message.answer_photo(
-                        photo=game["background_image"],
-                        caption=card_text,
-                        reply_markup=keyboard,
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    await message.answer(
-                        card_text,
-                        reply_markup=keyboard,
-                        parse_mode="Markdown",
-                    )
-            else:
-                await message.answer(
-                    card_text,
-                    reply_markup=keyboard,
-                    parse_mode="Markdown",
-                )
+    keywords = ai_result.get("keywords", [original_query]) or [original_query]
+    genres = ai_result.get("genres", [])
 
-    except Exception as e:
-        logger.error(f"Search error: {e}", exc_info=True)
-        try:
-            await searching_msg.delete()
-        except Exception:
-            pass
-        await message.answer(t("error_general", lang))
+    games = await search_games(keywords, genres, page=1)
 
+    # Якщо не знайшло — спробуємо лише перший keyword (назва гри)
+    if not games and keywords:
+        games = await search_games([keywords[0]], [], page=1)
+
+    # Останній резерв — оригінальний запит
+    if not games:
+        games = await search_games([original_query], [], page=1)
+
+    await searching_msg.delete()
+
+    if not games:
+        await message.answer(
+            t("search_no_results", lang),
+            reply_markup=main_menu_keyboard(
+                lang,
+                is_admin=message.from_user.id in settings.admin_ids,
+            ),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
+    await _show_games(message, state, games, lang, original_query, keywords, genres)
+
+
+# ──────────────────────────────────────────────
+# Колбеки: "Ще результати", "Шукати знову"
+# ──────────────────────────────────────────────
 
 @router.callback_query(F.data == "search:again")
 async def search_again(callback: CallbackQuery, state: FSMContext):
     lang = await get_user_lang(callback.from_user.id)
+    await state.clear()
     await state.set_state(SearchStates.waiting_for_description)
     await callback.message.answer(
         t("search_prompt", lang),
@@ -218,8 +340,7 @@ async def search_more(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Please search again.")
         return
 
-    await callback.answer("Loading more results...")
-
+    await callback.answer("Loading..." if lang == "en" else "Завантажую...")
     games = await search_games(keywords, genres, page=page)
 
     if not games:
@@ -243,7 +364,6 @@ async def search_more(callback: CallbackQuery, state: FSMContext):
             is_favorite=is_fav,
             page=page,
         )
-
         if game.get("background_image"):
             try:
                 await callback.message.answer_photo(
@@ -252,11 +372,15 @@ async def search_more(callback: CallbackQuery, state: FSMContext):
                     reply_markup=keyboard,
                     parse_mode="Markdown",
                 )
+                continue
             except Exception:
-                await callback.message.answer(card_text, reply_markup=keyboard, parse_mode="Markdown")
-        else:
-            await callback.message.answer(card_text, reply_markup=keyboard, parse_mode="Markdown")
+                pass
+        await callback.message.answer(card_text, reply_markup=keyboard, parse_mode="Markdown")
 
+
+# ──────────────────────────────────────────────
+# Обрані
+# ──────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("fav:") & ~F.data.startswith("fav:view:"))
 async def add_to_favorites(callback: CallbackQuery):
@@ -301,8 +425,20 @@ async def remove_from_favorites(callback: CallbackQuery):
         user_repo = UserRepository(session)
         fav_repo = FavoriteRepository(session)
         user = await user_repo.get_by_telegram_id(callback.from_user.id)
-
         if user:
             await fav_repo.remove(user.id, game_id)
 
     await callback.answer(t("removed_from_favorites", lang), show_alert=False)
+
+
+# ──────────────────────────────────────────────
+# Утиліти
+# ──────────────────────────────────────────────
+
+def _thinking_text(lang: str) -> str:
+    thinking = {
+        "ua": "🕵️ Думаю... аналізую підказки...",
+        "ru": "🕵️ Думаю... анализирую подсказки...",
+        "en": "🕵️ Thinking... analyzing clues...",
+    }
+    return thinking.get(lang, thinking["en"])
