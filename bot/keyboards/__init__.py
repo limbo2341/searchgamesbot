@@ -1,0 +1,31 @@
+from .keyboards import (
+    language_keyboard,
+    main_menu_keyboard,
+    back_keyboard,
+    game_result_keyboard,
+    premium_keyboard,
+    payment_method_keyboard,
+    stars_payment_keyboard,
+    admin_payment_keyboard,
+    admin_main_keyboard,
+    admin_support_ticket_keyboard,
+    settings_keyboard,
+    referral_keyboard,
+    favorites_keyboard,
+)
+
+__all__ = [
+    "language_keyboard",
+    "main_menu_keyboard",
+    "back_keyboard",
+    "game_result_keyboard",
+    "premium_keyboard",
+    "payment_method_keyboard",
+    "stars_payment_keyboard",
+    "admin_payment_keyboard",
+    "admin_main_keyboard",
+    "admin_support_ticket_keyboard",
+    "settings_keyboard",
+    "referral_keyboard",
+    "favorites_keyboard",
+]
