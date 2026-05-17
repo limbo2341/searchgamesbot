@@ -9,6 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import settings
 from bot.database import create_tables
+from bot.database.engine import set_redis
 from bot.handlers import get_all_routers
 from bot.middlewares import DatabaseMiddleware, AntiSpamMiddleware, BanCheckMiddleware
 from bot.middlewares.bot_disabled_middleware import BotDisabledMiddleware
@@ -29,6 +30,8 @@ async def main():
         redis_client = aioredis.from_url(settings.redis_url, decode_responses=False)
         await redis_client.ping()
         storage = RedisStorage.from_url(settings.redis_url)
+        # Зберігаємо redis в engine для використання в handlers
+        set_redis(redis_client)
         logger.info("Redis connected.")
     except Exception as e:
         logger.warning(f"Redis not available ({e}), using MemoryStorage.")
@@ -40,13 +43,9 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Прикріплюємо redis до bot щоб handlers могли його використати
-    if redis_client:
-        bot.redis = redis_client
-
     dp = Dispatcher(storage=storage)
 
-    # Middlewares — BotDisabled першим для message та callback
+    # BotDisabled middleware першим
     if redis_client:
         dp.message.middleware(BotDisabledMiddleware(redis_client))
         dp.callback_query.middleware(BotDisabledMiddleware(redis_client))
