@@ -7,7 +7,7 @@ from bot.config import settings
 
 logger = logging.getLogger(__name__)
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 DETECTIVE_SYSTEM = """You are GamesDetective — an expert gamer who knows ALL games across all platforms.
