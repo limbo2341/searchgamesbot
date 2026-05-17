@@ -7,78 +7,55 @@ from bot.config import settings
 
 logger = logging.getLogger(__name__)
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 DETECTIVE_SYSTEM = """You are GamesDetective — an expert gamer who knows ALL games across all platforms.
 A user tries to remember a game. Identify it through detective-style conversation.
 LANGUAGE RULE: Always reply in the same language as the user's LAST message.
 WORKFLOW: 1) Read all clues. 2) Think step by step. 3) confidence>=0.90 → final answer (clarification_needed=false). 4) confidence<0.90 → ask 1-2 SHORT questions.
-MOBILE: Brawl Stars(шеллі/shelly/бравл болл), Clash of Clans(ратуша/town hall), Clash Royale, Supercell publisher, Angry Birds, Candy Crush, Subway Surfers, Among Us, Genshin Impact, PUBG Mobile, Free Fire.
+MOBILE: Brawl Stars(шеллі/shelly/бравл болл), Clash of Clans(ратуша/town hall), Clash Royale, Supercell, Angry Birds, Candy Crush, Subway Surfers, Among Us, Genshin Impact, PUBG Mobile, Free Fire.
 PC: пубг=PUBG, майн=Minecraft, гта=GTA, кс=CS, дота=Dota2, фортнайт=Fortnite, вот=WoT, лол=LoL.
-RESPOND ONLY valid JSON: {"clarification_needed":true,"game_name":"","platform":"","confidence":0.6,"detective_message":"msg","keywords":["kw"],"genres":["g"]}"""
+RESPOND ONLY valid JSON no markdown: {"clarification_needed":true,"game_name":"","platform":"","confidence":0.6,"detective_message":"msg","keywords":["kw"],"genres":["g"]}"""
 
 CHAT_SYSTEM = """You are a friendly gaming assistant. Help users discuss games, recommend new ones, answer questions.
 LANGUAGE RULE: Always reply in the same language the user uses. Be concise and friendly."""
 
 
-async def _call_gemini(history: list, system: str = None) -> str | None:
-    if not settings.gemini_api_key:
+async def _call_groq(messages: list) -> str | None:
+    if not settings.groq_api_key:
+        logger.error("GROQ_API_KEY not set!")
         return None
-    contents = []
-    for m in history:
-        role = "user" if m["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": m["content"]}]})
-    payload = {
-        "system_instruction": {"parts": [{"text": system or DETECTIVE_SYSTEM}]},
-        "contents": contents,
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 700},
+    headers = {
+        "Authorization": f"Bearer {settings.groq_api_key}",
+        "Content-Type": "application/json",
     }
-    url = f"{GEMINI_URL}?key={settings.gemini_api_key}"
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "max_tokens": 700,
+        "temperature": 0.4,
+    }
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                async with s.post(GROQ_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
                     if r.status == 429:
-                        wait = 15 * (attempt + 1)
-                        logger.warning(f"Gemini 429, waiting {wait}s")
+                        wait = 10 * (attempt + 1)
+                        logger.warning(f"Groq 429, waiting {wait}s")
                         await asyncio.sleep(wait)
                         continue
                     if r.status != 200:
-                        logger.error(f"Gemini {r.status}: {await r.text()}")
+                        text = await r.text()
+                        logger.error(f"Groq {r.status}: {text[:200]}")
                         return None
                     data = await r.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                    return data["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.error(f"Gemini attempt {attempt+1}: {e}")
+            logger.error(f"Groq attempt {attempt+1}: {e}")
             if attempt < 2:
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
     return None
-
-
-async def _call_openrouter(history: list, system: str = None) -> str | None:
-    if not settings.openrouter_api_key:
-        return None
-    messages = [{"role": "system", "content": system or DETECTIVE_SYSTEM}] + history
-    headers = {"Authorization": f"Bearer {settings.openrouter_api_key}", "Content-Type": "application/json"}
-    payload = {"model": settings.openrouter_model, "messages": messages, "max_tokens": 700, "temperature": 0.4}
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(OPENROUTER_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                if r.status != 200:
-                    return None
-                data = await r.json()
-                return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error(f"OpenRouter: {e}")
-        return None
-
-
-async def _call_ai(history: list, system: str = None) -> str | None:
-    raw = await _call_gemini(history, system)
-    if raw is None:
-        raw = await _call_openrouter(history, system)
-    return raw
 
 
 def _parse_json(raw: str) -> dict:
@@ -103,7 +80,11 @@ def _parse_json(raw: str) -> dict:
 
 
 async def detective_analyze(history: list, language: str = "ua") -> dict:
-    raw = await _call_ai(history, DETECTIVE_SYSTEM)
+    messages = [{"role": "system", "content": DETECTIVE_SYSTEM}]
+    for m in history:
+        role = "user" if m["role"] == "user" else "assistant"
+        messages.append({"role": role, "content": m["content"]})
+    raw = await _call_groq(messages)
     if not raw:
         return _fallback(history[0]["content"] if history else "")
     result = _parse_json(raw)
@@ -123,7 +104,11 @@ async def detective_analyze(history: list, language: str = "ua") -> dict:
 
 
 async def chat_with_gemini(history: list) -> str | None:
-    return await _call_ai(history, CHAT_SYSTEM)
+    messages = [{"role": "system", "content": CHAT_SYSTEM}]
+    for m in history:
+        role = "user" if m["role"] == "user" else "assistant"
+        messages.append({"role": role, "content": m["content"]})
+    return await _call_groq(messages)
 
 
 def _fallback(q: str) -> dict:
