@@ -1,11 +1,5 @@
 """
 bot_control.py — Вмикання/вимикання бота адміном.
-
-Логіка:
-- Redis зберігає ключ bot:disabled = "1" / відсутній
-- Middleware перевіряє цей ключ перед кожним повідомленням
-- При вимкненні: адмін пише причину → всім юзерам розсилається сповіщення
-- При вмиканні: всім розсилається що бот знову працює
 """
 
 import logging
@@ -17,75 +11,81 @@ from aiogram.fsm.state import State, StatesGroup
 from bot.config import settings
 from bot.database import async_session_maker
 from bot.repositories import UserRepository
-from bot.keyboards import bot_disable_confirm_keyboard, admin_main_keyboard, back_keyboard
+from bot.keyboards import admin_main_keyboard, back_keyboard
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Redis ключ
 BOT_DISABLED_KEY = "bot:disabled"
-BOT_DISABLE_REASON_KEY = "bot:disable_reason"
+BOT_REASON_KEY = "bot:disable_reason"
 
 
 class BotControlStates(StatesGroup):
     waiting_for_disable_reason = State()
 
 
-# ── Утиліти Redis ──
+async def _get_redis():
+    """Отримує Redis з engine."""
+    try:
+        from bot.database.engine import get_redis
+        return await get_redis()
+    except Exception:
+        try:
+            import redis.asyncio as aioredis
+            from bot.config import settings
+            r = aioredis.from_url(settings.redis_url, decode_responses=False)
+            await r.ping()
+            return r
+        except Exception as e:
+            logger.error(f"Cannot get Redis: {e}")
+            return None
 
-async def is_bot_disabled(redis) -> bool:
-    val = await redis.get(BOT_DISABLED_KEY)
-    return val is not None
+
+async def is_bot_disabled() -> bool:
+    redis = await _get_redis()
+    if not redis:
+        return False
+    try:
+        return await redis.get(BOT_DISABLED_KEY) is not None
+    except Exception:
+        return False
 
 
-async def set_bot_disabled(redis, reason: str):
-    await redis.set(BOT_DISABLED_KEY, "1")
-    await redis.set(BOT_DISABLE_REASON_KEY, reason)
-
-
-async def set_bot_enabled(redis):
-    await redis.delete(BOT_DISABLED_KEY)
-    await redis.delete(BOT_DISABLE_REASON_KEY)
-
-
-async def get_disable_reason(redis) -> str:
-    val = await redis.get(BOT_DISABLE_REASON_KEY)
-    if val:
-        return val.decode() if isinstance(val, bytes) else val
+async def get_disable_reason() -> str:
+    redis = await _get_redis()
+    if not redis:
+        return "Технічні роботи"
+    try:
+        val = await redis.get(BOT_REASON_KEY)
+        if val:
+            return val.decode() if isinstance(val, bytes) else str(val)
+    except Exception:
+        pass
     return "Технічні роботи"
 
 
-# ── Broadcast всім користувачам ──
-
-async def broadcast_to_all(bot: Bot, text: str):
+async def broadcast_all(bot: Bot, text: str) -> tuple[int, int]:
     async with async_session_maker() as session:
-        user_repo = UserRepository(session)
-        users = await user_repo.get_all_active()
-
-    sent = 0
-    failed = 0
+        users = await UserRepository(session).get_all_active()
+    sent = failed = 0
     for user in users:
         try:
             await bot.send_message(user.telegram_id, text, parse_mode="HTML")
             sent += 1
         except Exception:
             failed += 1
-
-    logger.info(f"Broadcast done: {sent} sent, {failed} failed")
     return sent, failed
 
 
-# ── Колбеки адмін-панелі ──
+# ── Вимкнути бота ──
 
 @router.callback_query(F.data == "admin:bot:disable")
-async def admin_bot_disable_start(callback: CallbackQuery, state: FSMContext):
+async def btn_disable(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in settings.admin_ids:
         await callback.answer("❌ Немає доступу", show_alert=True)
         return
 
-    # Перевіряємо чи бот вже вимкнений
-    redis = callback.bot.redis if hasattr(callback.bot, "redis") else None
-    if redis and await is_bot_disabled(redis):
+    if await is_bot_disabled():
         await callback.answer("⚠️ Бот вже вимкнений!", show_alert=True)
         return
 
@@ -93,57 +93,16 @@ async def admin_bot_disable_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "🔴 <b>Вимкнення бота</b>\n\n"
         "Напиши причину вимкнення.\n"
-        "Це повідомлення отримають <b>всі користувачі</b>.\n\n"
-        "<i>Або напиши /cancel щоб скасувати.</i>",
+        "Всі користувачі отримають це повідомлення.\n\n"
+        "<i>Напиши /cancel щоб скасувати.</i>",
         parse_mode="HTML",
         reply_markup=back_keyboard("ua"),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin:bot:enable")
-async def admin_bot_enable(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in settings.admin_ids:
-        await callback.answer("❌ Немає доступу", show_alert=True)
-        return
-
-    redis = callback.bot.redis if hasattr(callback.bot, "redis") else None
-    if not redis:
-        await callback.answer("❌ Redis недоступний", show_alert=True)
-        return
-
-    if not await is_bot_disabled(redis):
-        await callback.answer("✅ Бот вже увімкнений!", show_alert=True)
-        return
-
-    await set_bot_enabled(redis)
-
-    enable_text = (
-        "✅ <b>Бот знову працює!</b>\n\n"
-        "🎮 Можеш шукати ігри — все відновлено!"
-    )
-    sent, failed = await broadcast_to_all(callback.bot, enable_text)
-
-    await callback.message.answer(
-        f"✅ <b>Бот увімкнений!</b>\n"
-        f"📨 Надіслано: {sent} | ❌ Помилок: {failed}",
-        parse_mode="HTML",
-        reply_markup=admin_main_keyboard(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin:bot:cancel")
-async def admin_bot_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer("❌ Скасовано.", reply_markup=admin_main_keyboard())
-    await callback.answer()
-
-
-# ── Отримання причини вимкнення ──
-
 @router.message(BotControlStates.waiting_for_disable_reason)
-async def admin_bot_disable_reason(message: Message, state: FSMContext):
+async def receive_disable_reason(message: Message, state: FSMContext):
     if message.from_user.id not in settings.admin_ids:
         return
 
@@ -157,27 +116,65 @@ async def admin_bot_disable_reason(message: Message, state: FSMContext):
         await message.answer("⚠️ Напиши причину (мінімум 3 символи).")
         return
 
-    redis = message.bot.redis if hasattr(message.bot, "redis") else None
+    redis = await _get_redis()
     if not redis:
-        await message.answer("❌ Redis недоступний. Неможливо вимкнути бота.")
+        await message.answer("❌ Redis недоступний.")
         await state.clear()
         return
 
-    await set_bot_disabled(redis, reason)
+    await redis.set(BOT_DISABLED_KEY, "1")
+    await redis.set(BOT_REASON_KEY, reason.encode())
 
-    disable_text = (
+    text = (
         f"🔴 <b>Бот тимчасово вимкнений</b>\n\n"
-        f"📋 <b>Причина:</b> {reason}\n\n"
-        f"<i>Ми повідомимо коли бот знову запрацює.</i>"
+        f"📋 Причина: {reason}\n\n"
+        f"<i>Повідомимо коли відновиться робота.</i>"
     )
-    sent, failed = await broadcast_to_all(message.bot, disable_text)
+    sent, failed = await broadcast_all(message.bot, text)
 
     await state.clear()
     await message.answer(
         f"🔴 <b>Бот вимкнено!</b>\n"
         f"📨 Надіслано: {sent} | ❌ Помилок: {failed}\n\n"
-        f"<b>Причина:</b> {reason}\n\n"
-        f"Щоб увімкнути — Admin Panel → 🟢 Увімкнути бота",
+        f"<b>Причина:</b> {reason}",
         parse_mode="HTML",
         reply_markup=admin_main_keyboard(),
     )
+
+
+# ── Увімкнути бота ──
+
+@router.callback_query(F.data == "admin:bot:enable")
+async def btn_enable(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in settings.admin_ids:
+        await callback.answer("❌ Немає доступу", show_alert=True)
+        return
+
+    if not await is_bot_disabled():
+        await callback.answer("✅ Бот вже увімкнений!", show_alert=True)
+        return
+
+    redis = await _get_redis()
+    if not redis:
+        await callback.answer("❌ Redis недоступний", show_alert=True)
+        return
+
+    await redis.delete(BOT_DISABLED_KEY)
+    await redis.delete(BOT_REASON_KEY)
+
+    text = "✅ <b>Бот знову працює!</b>\n\n🎮 Можеш шукати ігри — все відновлено!"
+    sent, failed = await broadcast_all(callback.bot, text)
+
+    await callback.message.answer(
+        f"✅ <b>Бот увімкнений!</b>\n📨 Надіслано: {sent} | ❌ Помилок: {failed}",
+        parse_mode="HTML",
+        reply_markup=admin_main_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:bot:cancel")
+async def btn_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("❌ Скасовано.", reply_markup=admin_main_keyboard())
+    await callback.answer()
