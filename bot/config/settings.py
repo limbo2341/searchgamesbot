@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     rawg_api_key: str = Field(..., env="RAWG_API_KEY")
     openrouter_model: str = Field("google/gemini-flash-1.5", env="OPENROUTER_MODEL")
     groq_api_key: str = Field("", env="GROQ_API_KEY")
+    gemini_api_key: str = Field("", env="GEMINI_API_KEY")
 
     # Payments
     privat_card: str = Field(..., env="PRIVAT_CARD")
