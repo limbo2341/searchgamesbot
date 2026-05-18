@@ -14,23 +14,20 @@ def language_keyboard() -> InlineKeyboardMarkup:
 
 def main_menu_keyboard(language: str = "en", is_admin: bool = False, is_premium: bool = False) -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    # Рядок 1
     builder.button(text=t("btn_search", language))
     builder.button(text=t("btn_profile", language))
-    # Рядок 2 — пошук по фото тільки для premium/admin
+
     if is_premium or is_admin:
         builder.button(text=t("btn_screenshot_search", language))
         builder.button(text=t("btn_ai_chat", language))
     else:
         builder.button(text=t("btn_screenshot_search_locked", language))
         builder.button(text=t("btn_ai_chat_limited", language))
-    # Рядок 3
+
     builder.button(text=t("btn_history", language))
     builder.button(text=t("btn_favorites", language))
-    # Рядок 4
     builder.button(text=t("btn_premium", language))
     builder.button(text=t("btn_referral", language))
-    # Рядок 5
     builder.button(text=t("btn_settings", language))
     builder.button(text=t("btn_support", language))
 
@@ -62,7 +59,7 @@ def game_result_keyboard(
     if is_favorite:
         builder.button(text=t("btn_remove_favorite", language), callback_data=f"unfav:{game_id}")
     else:
-        builder.button(text=t("btn_add_favorite", language), callback_data=f"fav:{game_id}:{game_name[:30]}")
+        builder.button(text=t("btn_add_favorite", language), callback_data=f"fav:{game_id}:{game_name[:25]}")
     builder.button(text=t("btn_not_that", language), callback_data="search:again")
     builder.button(text=t("btn_more_results", language), callback_data=f"search:more:{page + 1}")
     builder.adjust(1, 2)
@@ -107,17 +104,18 @@ def admin_payment_keyboard(payment_id: int) -> InlineKeyboardMarkup:
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Statistics", callback_data="admin:stats")
-    builder.button(text="👥 Users", callback_data="admin:users")
-    builder.button(text="💳 Payments", callback_data="admin:payments")
-    builder.button(text="📨 Support Tickets", callback_data="admin:support")
-    builder.button(text="📢 Broadcast", callback_data="admin:broadcast")
-    builder.button(text="⭐ Give Premium", callback_data="admin:give_premium")
-    builder.button(text="🚫 Ban User", callback_data="admin:ban")
-    builder.button(text="✅ Unban User", callback_data="admin:unban")
+    builder.button(text="📊 Статистика", callback_data="admin:stats")
+    builder.button(text="👥 Користувачі", callback_data="admin:users")
+    builder.button(text="💳 Платежі", callback_data="admin:payments")
+    builder.button(text="📨 Тікети", callback_data="admin:support")
+    builder.button(text="📢 Розсилка", callback_data="admin:broadcast")
+    builder.button(text="⭐ Видати Premium", callback_data="admin:give_premium")
+    builder.button(text="❌ Забрати Premium", callback_data="admin:remove_premium")
+    builder.button(text="🚫 Заблокувати", callback_data="admin:ban")
+    builder.button(text="✅ Розблокувати", callback_data="admin:unban")
     builder.button(text="🔴 Вимкнути бота", callback_data="admin:bot:disable")
     builder.button(text="🟢 Увімкнути бота", callback_data="admin:bot:enable")
-    builder.adjust(2, 2, 2, 2, 2)
+    builder.adjust(2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -131,8 +129,8 @@ def bot_disable_confirm_keyboard() -> InlineKeyboardMarkup:
 
 def admin_support_ticket_keyboard(ticket_id: int, user_telegram_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📝 Reply", callback_data=f"admin:support:reply:{ticket_id}:{user_telegram_id}")
-    builder.button(text="✅ Close", callback_data=f"admin:support:close:{ticket_id}")
+    builder.button(text="📝 Відповісти", callback_data=f"admin:support:reply:{ticket_id}:{user_telegram_id}")
+    builder.button(text="✅ Закрити", callback_data=f"admin:support:close:{ticket_id}")
     builder.adjust(2)
     return builder.as_markup()
 
