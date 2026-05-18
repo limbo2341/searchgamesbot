@@ -1,11 +1,7 @@
-"""
-screenshot.py — Пошук гри по скріншоту (тільки Premium).
-Використовує Groq через OpenRouter vision для аналізу зображення.
-"""
-
 import logging
 import aiohttp
 import json
+import base64
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
@@ -22,7 +18,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 ALL_BACK = ["← Back", "← Назад", "🏠 Main Menu", "🏠 Головне меню", "🏠 Главное меню"]
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_VISION_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 
 
 async def get_user_lang(telegram_id: int) -> str:
@@ -31,53 +27,50 @@ async def get_user_lang(telegram_id: int) -> str:
         return user.language if user else "en"
 
 
-async def analyze_screenshot_with_vision(image_url: str, caption: str, lang: str) -> dict:
-    """Аналізує скріншот через OpenRouter vision (безкоштовна модель)."""
+async def analyze_screenshot_gemini(image_bytes: bytes, caption: str, lang: str) -> dict:
     lang_names = {"en": "English", "ru": "Russian", "ua": "Ukrainian"}
     lang_name = lang_names.get(lang, "English")
 
-    system_prompt = f"""You are a game recognition expert. Look at this game screenshot carefully.
-Identify what game this is and extract search keywords.
-User language: {lang_name}.
-Respond ONLY in JSON:
-{{"possible_game": "Game name", "keywords": ["kw1", "kw2"], "genres": ["genre"], "confidence": 0.85, "clarification_needed": false}}"""
+    prompt = f"""You are a game recognition expert. Look at this screenshot carefully.
+Identify what game this is. User language: {lang_name}.
+Caption hint: {caption or 'none'}
+Respond ONLY in valid JSON:
+{{"possible_game": "Game name or empty", "keywords": ["kw1", "kw2"], "genres": ["genre"], "confidence": 0.85, "clarification_needed": false}}"""
 
-    # Використовуємо безкоштовну vision модель через OpenRouter
-    headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/SearchForGame_bot",
-    }
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
     payload = {
-        "model": "google/gemini-flash-1.5",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": caption or "What game is this?"},
-                ],
-            },
-        ],
-        "max_tokens": 400,
-        "temperature": 0.3,
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}
+            ]
+        }],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 400}
     }
+
+    url = f"{GEMINI_VISION_URL}?key={settings.gemini_api_key}"
 
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.post(OPENROUTER_URL, headers=headers, json=payload,
-                              timeout=aiohttp.ClientTimeout(total=20)) as r:
+            async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=25)) as r:
                 if r.status != 200:
                     text = await r.text()
-                    logger.error(f"Vision error {r.status}: {text[:200]}")
+                    logger.error(f"Gemini vision error {r.status}: {text[:200]}")
                     return {"keywords": [], "confidence": 0.3, "clarification_needed": True, "possible_game": ""}
                 data = await r.json()
-                raw = data["choices"][0]["message"]["content"]
-                clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                raw = data["candidates"][0]["content"]["parts"][0]["text"]
+                clean = raw.strip()
+                if "```" in clean:
+                    for p in clean.split("```"):
+                        p = p.strip().lstrip("json").strip()
+                        try:
+                            return json.loads(p)
+                        except Exception:
+                            continue
                 return json.loads(clean)
     except Exception as e:
-        logger.error(f"Screenshot analysis failed: {e}")
+        logger.error(f"Gemini vision failed: {e}")
         return {"keywords": [], "confidence": 0.3, "clarification_needed": True, "possible_game": ""}
 
 
@@ -132,9 +125,13 @@ async def handle_screenshot(message: Message, state: FSMContext):
         photo = message.photo[-1]
         file = await message.bot.get_file(photo.file_id)
         file_url = f"https://api.telegram.org/file/bot{settings.bot_token}/{file.file_path}"
-        caption = message.caption or "game screenshot"
 
-        ai_result = await analyze_screenshot_with_vision(file_url, caption, lang)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                image_bytes = await r.read()
+
+        caption = message.caption or ""
+        ai_result = await analyze_screenshot_gemini(image_bytes, caption, lang)
 
         keywords = ai_result.get("keywords", [])
         confidence = ai_result.get("confidence", 0)
