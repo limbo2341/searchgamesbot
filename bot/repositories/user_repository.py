@@ -100,15 +100,33 @@ class UserRepository:
             return False
         if user.is_banned:
             return False
-        if user.premium_status:
-            if user.premium_until and user.premium_until < datetime.utcnow():
+
+        # Автоматично знімаємо прострочений Premium
+        if user.premium_status and user.premium_until:
+            if user.premium_until < datetime.utcnow():
                 await self.remove_premium(telegram_id)
+                # Reload
+                user = await self.get_by_telegram_id(telegram_id)
             else:
                 return True
+        elif user.premium_status:
+            return True  # Безстроковий
+
         now = datetime.utcnow()
         if user.last_search_reset is None or (now - user.last_search_reset).days >= 1:
             return True
         return user.daily_search_count < free_limit
+
+    async def check_and_expire_premium(self, telegram_id: int) -> bool:
+        """Перевіряє чи закінчився Premium і знімає його. Повертає True якщо знятий."""
+        user = await self.get_by_telegram_id(telegram_id)
+        if not user:
+            return False
+        if user.premium_status and user.premium_until:
+            if user.premium_until < datetime.utcnow():
+                await self.remove_premium(telegram_id)
+                return True
+        return False
 
     async def set_premium(self, telegram_id: int, days: Optional[int] = None) -> None:
         if days is None:
@@ -159,7 +177,14 @@ class UserRepository:
 
     async def get_all_users(self) -> List[User]:
         result = await self.session.execute(select(User))
-        return result.scalars().all()
+        return list(result.scalars().all())
+
+    async def get_all_active(self) -> List[User]:
+        """Всі не заблоковані користувачі."""
+        result = await self.session.execute(
+            select(User).where(User.is_banned == False)
+        )
+        return list(result.scalars().all())
 
     async def get_total_count(self) -> int:
         result = await self.session.execute(select(func.count(User.id)))

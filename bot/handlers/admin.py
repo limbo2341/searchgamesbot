@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime, timedelta
-from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from datetime import datetime, timedelta, timezone
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import settings
 from bot.database import async_session_maker
@@ -14,13 +15,19 @@ from bot.states import AdminStates
 logger = logging.getLogger(__name__)
 router = Router()
 
+# Головний адмін — тільки він може банити адмінів і керувати адмін-правами
+MAIN_ADMIN_ID = 7245932902
 
-def is_admin(telegram_id: int) -> bool:
-    return telegram_id in settings.admin_ids
+
+def is_admin(tid: int) -> bool:
+    return tid in settings.admin_ids
+
+
+def is_main_admin(tid: int) -> bool:
+    return tid == MAIN_ADMIN_ID
 
 
 async def _get_bot_status() -> tuple[bool, str]:
-    """Повертає (is_disabled, reason)."""
     try:
         from bot.database.engine import get_redis
         redis = await get_redis()
@@ -36,6 +43,14 @@ async def _get_bot_status() -> tuple[bool, str]:
         return False, ""
 
 
+def _confirm_keyboard(action: str, target_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Підтвердити", callback_data=f"mainadmin:confirm:{action}:{target_id}")
+    builder.button(text="❌ Відхилити", callback_data=f"mainadmin:reject:{action}:{target_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 @router.message(Command("admin"))
 @router.message(F.text == "🔧 Admin Panel")
 async def admin_panel(message: Message, state: FSMContext):
@@ -43,7 +58,7 @@ async def admin_panel(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer(
-        "🔧 <b>Admin Panel</b>\n\nWelcome, Admin!",
+        "🔧 <b>Admin Panel</b>",
         reply_markup=admin_main_keyboard(),
         parse_mode="HTML",
     )
@@ -54,7 +69,7 @@ async def admin_panel(message: Message, state: FSMContext):
 @router.callback_query(F.data == "admin:stats")
 async def admin_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
 
     async with async_session_maker() as session:
@@ -72,9 +87,39 @@ async def admin_stats(callback: CallbackQuery):
         "📊 <b>Статистика бота</b>\n\n"
         f"🤖 <b>Статус:</b> {bot_status}\n\n"
         f"👥 <b>Всього користувачів:</b> {total_users}\n"
-        f"⭐ <b>Premium користувачів:</b> {premium_users}\n"
+        f"⭐ <b>Premium:</b> {premium_users}\n"
         f"🔍 <b>Всього пошуків:</b> {total_searches}\n"
     )
+
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+    await callback.answer()
+
+
+# ── Користувачі ──
+
+@router.callback_query(F.data == "admin:users")
+async def admin_users(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌", show_alert=True)
+        return
+
+    async with async_session_maker() as session:
+        users = await UserRepository(session).get_all_users()
+
+    if not users:
+        await callback.message.answer("👥 Немає користувачів.")
+        await callback.answer()
+        return
+
+    text = f"👥 <b>Користувачі ({len(users)})</b>\n\n"
+    for user in users[:20]:
+        premium = "⭐" if user.premium_status else "👤"
+        banned = " 🚫" if user.is_banned else ""
+        admin_mark = " 🔧" if user.telegram_id in settings.admin_ids else ""
+        text += f"{premium} {user.first_name or 'User'} | <code>{user.telegram_id}</code>{banned}{admin_mark}\n"
+
+    if len(users) > 20:
+        text += f"\n<i>...та ще {len(users) - 20}</i>"
 
     await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_main_keyboard())
     await callback.answer()
@@ -85,12 +130,11 @@ async def admin_stats(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:payments")
 async def admin_payments(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
 
     async with async_session_maker() as session:
-        pay_repo = PaymentRepository(session)
-        pending = await pay_repo.get_pending()
+        pending = await PaymentRepository(session).get_pending()
 
     if not pending:
         await callback.message.answer("✅ Немає платежів на перевірку.")
@@ -98,35 +142,40 @@ async def admin_payments(callback: CallbackQuery):
         return
 
     for payment in pending:
+        # Отримуємо telegram_id користувача
+        async with async_session_maker() as session:
+            user = await UserRepository(session).get_by_id(payment.user_id)
+        user_tid = user.telegram_id if user else payment.user_id
+
         text = (
             f"💳 <b>Платіж #{payment.id}</b>\n"
-            f"User ID: {payment.user_id}\n"
+            f"User TG ID: <code>{user_tid}</code>\n"
             f"Тариф: {payment.tariff}\n"
             f"Сума: {payment.amount}\n"
             f"Метод: {payment.payment_method}\n"
             f"Дата: {payment.created_at.strftime('%d.%m.%Y %H:%M')}"
         )
+        kb = admin_payment_keyboard(payment.id)
         if payment.screenshot_file_id:
-            await callback.message.bot.send_photo(
-                callback.from_user.id,
-                photo=payment.screenshot_file_id,
-                caption=text,
-                reply_markup=admin_payment_keyboard(payment.id),
-                parse_mode="HTML",
-            )
-        else:
-            await callback.message.answer(
-                text,
-                reply_markup=admin_payment_keyboard(payment.id),
-                parse_mode="HTML",
-            )
+            try:
+                await callback.message.bot.send_photo(
+                    callback.from_user.id,
+                    photo=payment.screenshot_file_id,
+                    caption=text,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+                continue
+            except Exception:
+                pass
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin:pay:approve:"))
 async def admin_approve_payment(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
 
     payment_id = int(callback.data.split(":")[3])
@@ -134,40 +183,82 @@ async def admin_approve_payment(callback: CallbackQuery):
     async with async_session_maker() as session:
         pay_repo = PaymentRepository(session)
         user_repo = UserRepository(session)
-        payment = await pay_repo.get_by_id(payment_id)
 
+        payment = await pay_repo.get_by_id(payment_id)
         if not payment:
-            await callback.answer("Payment not found.", show_alert=True)
+            await callback.answer("❌ Платіж не знайдено", show_alert=True)
             return
 
+        if payment.status != "pending":
+            await callback.answer(f"⚠️ Вже оброблено: {payment.status}", show_alert=True)
+            return
+
+        # Даємо Premium
         days_map = {"7": 7, "30": 30, "90": 90, "forever": None}
         days = days_map.get(str(payment.tariff), 30)
 
-        user = await user_repo.get_by_id(payment.user_telegram_id)
+        user = await user_repo.get_by_id(payment.user_id)
         if user:
             await user_repo.set_premium(user.telegram_id, days=days)
 
-        await pay_repo.update_status(payment_id, "approved")
+        await pay_repo.approve(payment_id, callback.from_user.id)
 
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"✅ Платіж #{payment_id} підтверджено!")
+    days_text = f"{days} днів" if days else "Назавжди"
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(f"✅ Платіж #{payment_id} підтверджено! Premium {days_text} → {user.telegram_id if user else '?'}")
+
+    if user:
+        try:
+            await callback.bot.send_message(
+                user.telegram_id,
+                f"🎉 <b>Платіж підтверджено!</b>\n\nTвій Premium активовано на {days_text}! ⭐",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
     await callback.answer("✅ Approved!")
 
 
 @router.callback_query(F.data.startswith("admin:pay:reject:"))
 async def admin_reject_payment(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
 
     payment_id = int(callback.data.split(":")[3])
 
     async with async_session_maker() as session:
         pay_repo = PaymentRepository(session)
-        await pay_repo.update_status(payment_id, "rejected")
+        payment = await pay_repo.get_by_id(payment_id)
+        if not payment:
+            await callback.answer("❌ Не знайдено", show_alert=True)
+            return
 
-    await callback.message.edit_reply_markup(reply_markup=None)
+        user = await UserRepository(session).get_by_id(payment.user_id)
+        await pay_repo.reject(payment_id, callback.from_user.id)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
     await callback.message.answer(f"❌ Платіж #{payment_id} відхилено.")
+
+    if user:
+        try:
+            await callback.bot.send_message(
+                user.telegram_id,
+                "❌ На жаль, твій платіж відхилено. Зверніться до підтримки.",
+            )
+        except Exception:
+            pass
+
     await callback.answer("❌ Rejected!")
 
 
@@ -176,9 +267,8 @@ async def admin_reject_payment(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_for_broadcast)
     await callback.message.answer("📢 Напиши повідомлення для розсилки:")
     await callback.answer()
@@ -188,9 +278,8 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
 async def admin_broadcast_send(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-
     await state.clear()
-    sending_msg = await message.answer("📢 Надсилаю розсилку...")
+    sending_msg = await message.answer("📢 Надсилаю...")
 
     async with async_session_maker() as session:
         users = await UserRepository(session).get_all_users()
@@ -209,12 +298,13 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
         except Exception:
             failed += 1
 
-    await sending_msg.delete()
+    try:
+        await sending_msg.delete()
+    except Exception:
+        pass
+
     await message.answer(
-        f"✅ <b>Розсилка завершена!</b>\n\n"
-        f"📨 Надіслано: {sent}\n"
-        f"❌ Помилок: {failed}\n"
-        f"👥 Всього: {sent + failed}",
+        f"✅ <b>Розсилка завершена!</b>\n\n📨 Надіслано: {sent}\n❌ Помилок: {failed}\n👥 Всього: {sent+failed}",
         parse_mode="HTML",
         reply_markup=admin_main_keyboard(),
     )
@@ -225,9 +315,8 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
 @router.callback_query(F.data == "admin:give_premium")
 async def admin_give_premium_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_for_user_id)
     await state.update_data(action="give_premium")
     await callback.message.answer("👤 Введи Telegram ID користувача:")
@@ -239,35 +328,32 @@ async def admin_give_premium_start(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin:remove_premium")
 async def admin_remove_premium_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_for_user_id)
     await state.update_data(action="remove_premium")
-    await callback.message.answer("👤 Введи Telegram ID користувача для видалення Premium:")
+    await callback.message.answer("👤 Введи Telegram ID для видалення Premium:")
     await callback.answer()
 
 
-# ── Ban/Unban ──
+# ── Ban ──
 
 @router.callback_query(F.data == "admin:ban")
 async def admin_ban_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_for_user_id)
     await state.update_data(action="ban")
-    await callback.message.answer("👤 Введи Telegram ID для бану:")
+    await callback.message.answer("👤 Введи Telegram ID для бану:\n\n<i>Формат: ID причина_бану кількість_днів (0=назавжди)</i>\n<i>Приклад: 123456789 спам 7</i>", parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data == "admin:unban")
 async def admin_unban_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     await state.set_state(AdminStates.waiting_for_user_id)
     await state.update_data(action="unban")
     await callback.message.answer("👤 Введи Telegram ID для розбану:")
@@ -279,12 +365,11 @@ async def admin_unban_start(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin:support")
 async def admin_support(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
 
     async with async_session_maker() as session:
-        support_repo = SupportRepository(session)
-        tickets = await support_repo.get_open_tickets()
+        tickets = await SupportRepository(session).get_open()
 
     if not tickets:
         await callback.message.answer("✅ Немає відкритих тікетів.")
@@ -292,11 +377,7 @@ async def admin_support(callback: CallbackQuery):
         return
 
     for ticket in tickets[:10]:
-        text = (
-            f"📨 <b>Тікет #{ticket.id}</b>\n"
-            f"Від: {ticket.user_id}\n\n"
-            f"{ticket.message}"
-        )
+        text = f"📨 <b>Тікет #{ticket.id}</b>\nВід: {ticket.user_id}\n\n{ticket.message}"
         await callback.message.answer(
             text,
             reply_markup=admin_support_ticket_keyboard(ticket.id, ticket.user_id),
@@ -308,16 +389,14 @@ async def admin_support(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("admin:support:reply:"))
 async def admin_support_reply_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     parts = callback.data.split(":")
     ticket_id = int(parts[3])
     user_tid = int(parts[4])
-
     await state.set_state(AdminStates.waiting_for_support_reply)
     await state.update_data(ticket_id=ticket_id, user_telegram_id=user_tid)
-    await callback.message.answer(f"📝 Напиши відповідь на тікет #{ticket_id}:")
+    await callback.message.answer(f"📝 Відповідь на тікет #{ticket_id}:")
     await callback.answer()
 
 
@@ -325,78 +404,53 @@ async def admin_support_reply_start(callback: CallbackQuery, state: FSMContext):
 async def admin_support_reply_send(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-
     data = await state.get_data()
     ticket_id = data.get("ticket_id")
     user_tid = data.get("user_telegram_id")
-
     try:
-        await message.bot.send_message(
-            user_tid,
-            f"📩 <b>Відповідь підтримки:</b>\n\n{message.text}",
-            parse_mode="HTML",
-        )
-        await message.answer(f"✅ Відповідь надіслано на тікет #{ticket_id}!")
+        await message.bot.send_message(user_tid, f"📩 <b>Відповідь підтримки:</b>\n\n{message.text}", parse_mode="HTML")
+        await message.answer(f"✅ Відповідь надіслано на тікет #{ticket_id}!", reply_markup=admin_main_keyboard())
     except Exception as e:
         await message.answer(f"❌ Помилка: {e}")
-
     await state.clear()
 
 
 @router.callback_query(F.data.startswith("admin:support:close:"))
 async def admin_support_close(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
-
     ticket_id = int(callback.data.split(":")[3])
     async with async_session_maker() as session:
-        await SupportRepository(session).close_ticket(ticket_id)
-
-    await callback.message.edit_reply_markup(reply_markup=None)
+        await SupportRepository(session).close(ticket_id, "Closed by admin")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await callback.message.answer(f"✅ Тікет #{ticket_id} закрито.")
     await callback.answer()
 
 
-# ── Users list ──
-
-@router.callback_query(F.data == "admin:users")
-async def admin_users(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Access denied.", show_alert=True)
-        return
-
-    async with async_session_maker() as session:
-        users = await UserRepository(session).get_all_users()
-
-    text = f"👥 <b>Користувачі ({len(users)})</b>\n\n"
-    for user in users[:20]:
-        premium = "⭐" if user.premium_status else "👤"
-        banned = " 🚫" if user.is_banned else ""
-        text += f"{premium} {user.first_name or 'User'} | ID: <code>{user.telegram_id}</code>{banned}\n"
-
-    if len(users) > 20:
-        text += f"\n<i>...та ще {len(users) - 20} користувачів</i>"
-
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_main_keyboard())
-    await callback.answer()
-
-
-# ── Обробка ID ──
+# ── Обробка user ID від простого адміна (з підтвердженням головного) ──
 
 @router.message(AdminStates.waiting_for_user_id)
 async def admin_user_id_received(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
-    try:
-        target_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Невірний ID. Введи число.")
-        return
-
     data = await state.get_data()
     action = data.get("action")
+
+    # Парсимо введення
+    parts = message.text.strip().split()
+    try:
+        target_id = int(parts[0])
+    except (ValueError, IndexError):
+        await message.answer("❌ Невірний формат.")
+        return
+
+    ban_reason = parts[1] if len(parts) > 1 else "Порушення правил"
+    ban_days = int(parts[2]) if len(parts) > 2 else 0
 
     if action == "give_premium":
         await state.update_data(target_id=target_id)
@@ -404,26 +458,151 @@ async def admin_user_id_received(message: Message, state: FSMContext):
         await message.answer("📅 Введи кількість днів (0 = назавжди):")
         return
 
+    # Перевіряємо чи target є адміном
+    target_is_admin = target_id in settings.admin_ids
+
+    # Якщо звичайний адмін хоче зробити дію — надсилаємо запит головному
+    if not is_main_admin(message.from_user.id):
+        # Перевіряємо імунітет адміна
+        if target_is_admin and action in ("ban", "remove_premium"):
+            await message.answer("🚫 Ти не можеш виконати цю дію над іншим адміном. Тільки головний адмін може.")
+            await state.clear()
+            return
+
+        # Надсилаємо запит головному адміну
+        action_names = {
+            "ban": f"🚫 Забанити на {ban_days} дн. (причина: {ban_reason})",
+            "unban": "✅ Розбанити",
+            "remove_premium": "❌ Забрати Premium",
+        }
+        action_text = action_names.get(action, action)
+
+        # Зберігаємо дані для підтвердження
+        confirm_key = f"confirm:{action}:{target_id}:{ban_days}:{ban_reason}"
+        await state.update_data(
+            target_id=target_id,
+            ban_reason=ban_reason,
+            ban_days=ban_days,
+            pending_action=action,
+        )
+
+        try:
+            await message.bot.send_message(
+                MAIN_ADMIN_ID,
+                f"⚠️ <b>Запит від адміна</b>\n\n"
+                f"👮 Адмін: @{message.from_user.username or message.from_user.id}\n"
+                f"🎯 Дія: {action_text}\n"
+                f"👤 Ціль: <code>{target_id}</code>\n\n"
+                f"Підтвердити?",
+                reply_markup=_confirm_keyboard(f"{action}_{target_id}_{ban_days}_{ban_reason.replace(' ', '_')}", message.from_user.id),
+                parse_mode="HTML",
+            )
+            await message.answer(
+                "⏳ <b>Запит надіслано головному адміну.</b>\nЗачекайте на підтвердження.",
+                parse_mode="HTML",
+                reply_markup=admin_main_keyboard(),
+            )
+        except Exception as e:
+            await message.answer(f"❌ Не вдалось надіслати запит: {e}")
+
+        await state.clear()
+        return
+
+    # Головний адмін — виконує без підтвердження
+    await _execute_admin_action(
+        message, action, target_id,
+        ban_reason=ban_reason, ban_days=ban_days,
+    )
+    await state.clear()
+
+
+# ── Підтвердження від головного адміна ──
+
+@router.callback_query(F.data.startswith("mainadmin:confirm:"))
+async def main_admin_confirm(callback: CallbackQuery):
+    if not is_main_admin(callback.from_user.id):
+        await callback.answer("❌ Тільки головний адмін", show_alert=True)
+        return
+
+    # mainadmin:confirm:action_targetid_days_reason:requester_id
+    parts = callback.data.split(":", 3)
+    action_data = parts[2]
+    requester_id = int(parts[3])
+
+    action_parts = action_data.split("_")
+    action = action_parts[0]
+    target_id = int(action_parts[1])
+    ban_days = int(action_parts[2]) if len(action_parts) > 2 else 0
+    ban_reason = " ".join(action_parts[3:]).replace("_", " ") if len(action_parts) > 3 else "Порушення"
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await _execute_admin_action_bot(
+        callback.bot, callback.message, action, target_id,
+        ban_reason=ban_reason, ban_days=ban_days,
+    )
+
+    # Повідомляємо адміна що зробив запит
+    try:
+        await callback.bot.send_message(requester_id, f"✅ Головний адмін підтвердив твій запит щодо <code>{target_id}</code>.", parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("✅ Виконано!")
+
+
+@router.callback_query(F.data.startswith("mainadmin:reject:"))
+async def main_admin_reject(callback: CallbackQuery):
+    if not is_main_admin(callback.from_user.id):
+        await callback.answer("❌", show_alert=True)
+        return
+
+    parts = callback.data.split(":", 3)
+    requester_id = int(parts[3])
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer("❌ Запит відхилено.")
+
+    try:
+        await callback.bot.send_message(requester_id, "❌ Головний адмін відхилив твій запит.")
+    except Exception:
+        pass
+
+    await callback.answer("❌ Відхилено!")
+
+
+async def _execute_admin_action(message: Message, action: str, target_id: int, ban_reason: str = "", ban_days: int = 0):
     async with async_session_maker() as session:
         user_repo = UserRepository(session)
         user = await user_repo.get_by_telegram_id(target_id)
 
         if not user:
             await message.answer("❌ Користувача не знайдено.")
-            await state.clear()
             return
 
         if action == "ban":
             await user_repo.ban_user(target_id)
-            await message.answer(f"🚫 Користувача {target_id} заблоковано.")
+            ban_text = f"назавжди" if ban_days == 0 else f"на {ban_days} днів"
+            await message.answer(f"🚫 Користувача <code>{target_id}</code> заблоковано {ban_text}.\nПричина: {ban_reason}", parse_mode="HTML", reply_markup=admin_main_keyboard())
             try:
-                await message.bot.send_message(target_id, "🚫 Тебе заблоковано в боті.")
+                await message.bot.send_message(
+                    target_id,
+                    f"🚫 <b>Тебе заблоковано</b>\n\nПричина: {ban_reason}\nТермін: {ban_text}",
+                    parse_mode="HTML",
+                )
             except Exception:
                 pass
 
         elif action == "unban":
             await user_repo.unban_user(target_id)
-            await message.answer(f"✅ Користувача {target_id} розблоковано.")
+            await message.answer(f"✅ Користувача <code>{target_id}</code> розблоковано.", parse_mode="HTML", reply_markup=admin_main_keyboard())
             try:
                 await message.bot.send_message(target_id, "✅ Тебе розблоковано! Можеш користуватись ботом.")
             except Exception:
@@ -431,18 +610,47 @@ async def admin_user_id_received(message: Message, state: FSMContext):
 
         elif action == "remove_premium":
             await user_repo.remove_premium(target_id)
-            await message.answer(f"❌ Premium видалено у користувача {target_id}.")
-            # Надсилаємо сповіщення юзеру
+            await message.answer(f"❌ Premium видалено у <code>{target_id}</code>.", parse_mode="HTML", reply_markup=admin_main_keyboard())
             try:
-                await message.bot.send_message(
-                    target_id,
-                    "ℹ️ Твій Premium статус було видалено адміністратором.",
-                )
+                await message.bot.send_message(target_id, "ℹ️ Твій Premium статус видалено адміністратором.")
             except Exception:
                 pass
 
-    await state.clear()
-    await message.answer("✅ Готово!", reply_markup=admin_main_keyboard())
+
+async def _execute_admin_action_bot(bot, message: Message, action: str, target_id: int, ban_reason: str = "", ban_days: int = 0):
+    """Версія без message.bot для використання з callback."""
+    async with async_session_maker() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(target_id)
+
+        if not user:
+            await message.answer("❌ Користувача не знайдено.")
+            return
+
+        if action == "ban":
+            await user_repo.ban_user(target_id)
+            ban_text = "назавжди" if ban_days == 0 else f"на {ban_days} днів"
+            await message.answer(f"🚫 <code>{target_id}</code> заблоковано {ban_text}. Причина: {ban_reason}", parse_mode="HTML")
+            try:
+                await bot.send_message(target_id, f"🚫 <b>Тебе заблоковано</b>\n\nПричина: {ban_reason}\nТермін: {ban_text}", parse_mode="HTML")
+            except Exception:
+                pass
+
+        elif action == "unban":
+            await user_repo.unban_user(target_id)
+            await message.answer(f"✅ <code>{target_id}</code> розблоковано.", parse_mode="HTML")
+            try:
+                await bot.send_message(target_id, "✅ Тебе розблоковано!")
+            except Exception:
+                pass
+
+        elif action == "remove_premium":
+            await user_repo.remove_premium(target_id)
+            await message.answer(f"❌ Premium видалено у <code>{target_id}</code>.", parse_mode="HTML")
+            try:
+                await bot.send_message(target_id, "ℹ️ Твій Premium статус видалено.")
+            except Exception:
+                pass
 
 
 @router.message(AdminStates.waiting_for_premium_days)
@@ -459,21 +667,34 @@ async def admin_premium_days_received(message: Message, state: FSMContext):
     data = await state.get_data()
     target_id = data.get("target_id")
 
+    # Якщо не головний адмін — надсилаємо запит
+    if not is_main_admin(message.from_user.id):
+        days_text = f"{days} днів" if days > 0 else "Назавжди"
+        try:
+            await message.bot.send_message(
+                MAIN_ADMIN_ID,
+                f"⚠️ <b>Запит від адміна</b>\n\n"
+                f"👮 Адмін: @{message.from_user.username or message.from_user.id}\n"
+                f"🎯 Дія: ⭐ Видати Premium на {days_text}\n"
+                f"👤 Ціль: <code>{target_id}</code>",
+                reply_markup=_confirm_keyboard(f"give_premium_{target_id}_{days}_none", message.from_user.id),
+                parse_mode="HTML",
+            )
+            await message.answer("⏳ Запит надіслано головному адміну.", reply_markup=admin_main_keyboard())
+        except Exception as e:
+            await message.answer(f"❌ Помилка: {e}")
+        await state.clear()
+        return
+
+    # Головний адмін — одразу
     async with async_session_maker() as session:
         await UserRepository(session).set_premium(target_id, days=days if days > 0 else None)
 
     days_text = f"{days} днів" if days > 0 else "Назавжди"
-    await message.answer(
-        f"⭐ Premium видано користувачу {target_id} на {days_text}!",
-        reply_markup=admin_main_keyboard(),
-    )
+    await message.answer(f"⭐ Premium видано <code>{target_id}</code> на {days_text}!", parse_mode="HTML", reply_markup=admin_main_keyboard())
 
     try:
-        await message.bot.send_message(
-            target_id,
-            f"🎉 Тобі видано Premium на {days_text} від адміна!\n\n"
-            f"✨ Тепер доступні всі функції бота.",
-        )
+        await message.bot.send_message(target_id, f"🎉 Тобі видано Premium на {days_text}! ⭐")
     except Exception:
         pass
 
