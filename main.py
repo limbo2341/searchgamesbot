@@ -11,6 +11,7 @@ from bot.config import settings
 from bot.database import create_tables
 from bot.database.engine import set_redis
 from bot.handlers import get_all_routers
+from bot.utils.premium_scheduler import run_premium_scheduler
 from bot.middlewares.subscription_middleware import SubscriptionMiddleware
 from bot.middlewares import DatabaseMiddleware, AntiSpamMiddleware, BanCheckMiddleware
 from bot.middlewares.bot_disabled_middleware import BotDisabledMiddleware
@@ -64,7 +65,8 @@ async def main():
 
     logger.info("Bot started! Polling...")
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        asyncio.create_task(run_premium_scheduler(bot))
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()
         if redis_client:
