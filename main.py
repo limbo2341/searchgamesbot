@@ -66,7 +66,7 @@ async def main():
     logger.info("Bot started! Polling...")
     try:
         asyncio.create_task(run_premium_scheduler(bot))
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()
         if redis_client:
