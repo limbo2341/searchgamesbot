@@ -136,10 +136,7 @@ async def _show_users_page(callback: CallbackQuery, page: int):
     if nav: rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -775,10 +772,7 @@ async def _show_stats_page(callback: CallbackQuery, page: int):
     if page < pages - 1:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:ustats:p:{page+1}"))
     kb = InlineKeyboardMarkup(inline_keyboard=[nav, [InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")]])
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "admin:broadcast_tag")
@@ -963,8 +957,5 @@ async def _show_banlist_page(callback: CallbackQuery, page: int):
     if nav: rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
