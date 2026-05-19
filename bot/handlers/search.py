@@ -158,7 +158,7 @@ async def _show_games(message, state, games, lang, query, keywords, genres):
         user = await UserRepository(s).get_by_telegram_id(message.from_user.id)
         await SearchHistoryRepository(s).add(user_id=user.id, search_query=query, result_game=games[0]["name"] if games else None)
     await state.set_state(SearchStates.showing_results)
-    for game in games[:6]:
+    for game in games[:1]:
         source = game.get("source", "")
         if source:
             card = _store_card(game, lang)
