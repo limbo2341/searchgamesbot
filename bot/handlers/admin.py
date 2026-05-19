@@ -699,3 +699,49 @@ async def admin_premium_days_received(message: Message, state: FSMContext):
         pass
 
     await state.clear()
+
+@router.callback_query(F.data == "admin:user_stats")
+async def show_user_stats(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in settings.admin_ids:
+        await callback.answer("❌ Немає доступу", show_alert=True)
+        return
+
+    async with async_session_maker() as session:
+        users = await UserRepository(session).get_all_active()
+        if not users:
+            await callback.answer("Немає користувачів", show_alert=True)
+            return
+
+        lines = ["📊 <b>Статистика користувачів</b>\n"]
+        for user in users[:20]:
+            history = await SearchHistoryRepository(session).get_user_history(user.id, limit=9999)
+            search_count = len(history)
+
+            try:
+                from bot.database.engine import get_redis
+                r = await get_redis()
+                from datetime import date
+                chat_count_today = await r.get(f"chat:{user.telegram_id}:{date.today()}")
+                chat_total = await r.get(f"chat_total:{user.telegram_id}")
+                chat_today = int(chat_count_today) if chat_count_today else 0
+                chat_all = int(chat_total) if chat_total else 0
+            except Exception:
+                chat_today = 0
+                chat_all = 0
+
+            name = user.first_name or user.username or f"User"
+            status = "⭐" if user.premium_status else "👤"
+            lines.append(
+                f"{status} <b>{name}</b> (<code>{user.telegram_id}</code>)\n"
+                f"   🔍 Пошук: <b>{search_count}</b> раз\n"
+                f"   🤖 AI чат сьогодні: <b>{chat_today}</b> | всього: <b>{chat_all}</b>\n"
+            )
+
+    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data="admin:user_stats")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:back")]
+    ])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()

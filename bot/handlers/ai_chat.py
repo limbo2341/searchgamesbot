@@ -62,6 +62,7 @@ async def _inc_count(tid: int):
             return
         k = f"chat:{tid}:{date.today()}"
         await r.incr(k)
+        await r.incr(f"chat_total:{tid}")
         await r.expire(k, 86400)
     except Exception:
         pass
