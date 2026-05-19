@@ -57,6 +57,8 @@ async def main():
     dp.callback_query.middleware(AntiSpamMiddleware(rate_limit=0.3))
     dp.message.middleware(BanCheckMiddleware())
     dp.callback_query.middleware(BanCheckMiddleware())
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
 
     dp.include_router(get_all_routers())
 
