@@ -745,3 +745,141 @@ async def show_user_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
+
+@router.callback_query(F.data == "admin:broadcast_tag")
+async def broadcast_tag_start(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    if uid not in settings.admin_ids:
+        await callback.answer("❌", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_broadcast_tag)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Всім", callback_data="btag:all")],
+        [InlineKeyboardButton(text="⭐ Тільки Premium", callback_data="btag:premium")],
+        [InlineKeyboardButton(text="👤 Тільки безкоштовним", callback_data="btag:free")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:back")]
+    ])
+    await callback.message.edit_text(
+        "📢 <b>Розсилка з тегами</b>\n\nОбери кому відправити:",
+        parse_mode="HTML", reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("btag:"))
+async def broadcast_tag_select(callback: CallbackQuery, state: FSMContext):
+    target = callback.data.split(":")[1]
+    await state.update_data(broadcast_target=target)
+    await state.set_state(AdminStates.waiting_broadcast_message)
+    target_names = {"all": "всіх", "premium": "Premium юзерів", "free": "безкоштовних"}
+    await callback.message.edit_text(
+        f"✍️ Напиши текст оголошення для <b>{target_names.get(target, 'всіх')}</b>.\n\n"
+        f"Можна використовувати HTML: <b>жирний</b>, <i>курсив</i>, <u>підкреслений</u>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_broadcast_message)
+async def broadcast_tag_send(message: Message, state: FSMContext):
+    if message.from_user.id not in settings.admin_ids:
+        return
+    data = await state.get_data()
+    target = data.get("broadcast_target", "all")
+    await state.clear()
+
+    async with async_session_maker() as session:
+        all_users = await UserRepository(session).get_all_active()
+
+    if target == "premium":
+        users = [u for u in all_users if u.premium_status]
+    elif target == "free":
+        users = [u for u in all_users if not u.premium_status]
+    else:
+        users = all_users
+
+    progress_msg = await message.answer(f"📤 Відправляю... 0/{len(users)}")
+
+    sent = 0
+    failed = 0
+    batch_size = 10
+
+    for i, user in enumerate(users):
+        try:
+            tag = f'<a href="tg://user?id={user.telegram_id}">{user.first_name or "Користувач"}</a>'
+            text = (
+                f"📢 <b>Оголошення від адміністрації</b>\n\n"
+                f"👋 {tag}, є новини!\n\n"
+                f"{message.text or message.caption or ''}\n\n"
+                f"🤖 @{(await message.bot.get_me()).username}"
+            )
+            await message.bot.send_message(
+                user.telegram_id, text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+        if (i + 1) % batch_size == 0:
+            try:
+                await progress_msg.edit_text(f"📤 Відправляю... {i+1}/{len(users)}")
+            except Exception:
+                pass
+        await asyncio.sleep(0.05)
+
+    await progress_msg.edit_text(
+        f"✅ <b>Розсилка завершена!</b>\n\n"
+        f"📨 Відправлено: <b>{sent}</b>\n"
+        f"❌ Не доставлено: <b>{failed}</b>\n"
+        f"👥 Всього: <b>{len(users)}</b>",
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin:send_features")
+async def send_features(callback: CallbackQuery):
+    if callback.from_user.id not in settings.admin_ids:
+        await callback.answer("❌", show_alert=True)
+        return
+
+    async with async_session_maker() as session:
+        all_users = await UserRepository(session).get_all_active()
+
+    free_text = (
+        "🎮 <b>Що нового в боті!</b>\n\n"
+        "👤 <b>Безкоштовно:</b>\n"
+        "🔍 Пошук ігор по опису\n"
+        "🕵️ Детектив-режим (бот ставить питання)\n"
+        "❤️ Обране — зберігай ігри\n"
+        "🕐 Історія пошуків\n"
+        "👥 Запроси друга — отримай більше пошуків\n\n"
+        "⭐ <b>Premium можливості:</b>\n"
+        "🖼️ Пошук по скріншоту\n"
+        "🤖 AI Чат — безліміт\n"
+        "♾️ Необмежений пошук\n"
+        "🥇 Пріоритетна підтримка\n\n"
+        "💎 Купи Premium: натисни ⭐ Premium в меню!"
+    )
+
+    premium_text = (
+        "⭐ <b>Дякуємо що ти Premium!</b>\n\n"
+        "🎁 Твої ексклюзивні можливості:\n"
+        "🖼️ Пошук по скріншоту гри\n"
+        "🤖 AI Чат без обмежень\n"
+        "♾️ Необмежений пошук ігор\n"
+        "🥇 Пріоритетна підтримка\n\n"
+        "🆕 <b>Скоро нові функції тільки для Premium!</b>"
+    )
+
+    sent = 0
+    for user in all_users:
+        try:
+            text = premium_text if user.premium_status else free_text
+            await callback.bot.send_message(
+                user.telegram_id, text, parse_mode="HTML"
+            )
+            sent += 1
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+
+    await callback.answer(f"✅ Відправлено {sent} юзерам!", show_alert=True)
