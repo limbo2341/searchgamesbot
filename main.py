@@ -11,6 +11,7 @@ from bot.config import settings
 from bot.database import create_tables
 from bot.database.engine import set_redis
 from bot.handlers import get_all_routers
+from bot.middlewares.subscription_middleware import SubscriptionMiddleware
 from bot.middlewares import DatabaseMiddleware, AntiSpamMiddleware, BanCheckMiddleware
 from bot.middlewares.bot_disabled_middleware import BotDisabledMiddleware
 from bot.utils import setup_logging

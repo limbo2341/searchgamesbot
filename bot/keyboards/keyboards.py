@@ -109,6 +109,7 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💳 Платежі", callback_data="admin:payments")
     builder.button(text="📨 Тікети", callback_data="admin:support")
     builder.button(text="📢 Розсилка", callback_data="admin:broadcast")
+    builder.button(text="📺 Канали підписки", callback_data="admin:channels")
     builder.button(text="📢 Розсилка з тегами", callback_data="admin:broadcast_tag")
     builder.button(text="🆕 Що нового юзерам", callback_data="admin:send_features")
     builder.button(text="📊 Статистика юзерів", callback_data="admin:user_stats")
