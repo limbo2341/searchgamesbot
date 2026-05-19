@@ -17,6 +17,8 @@ class SupportStates(StatesGroup):
 
 
 class AdminStates(StatesGroup):
+    waiting_broadcast_tag = State()
+    waiting_broadcast_message = State()
     waiting_for_broadcast = State()
     waiting_for_user_id = State()
     waiting_for_premium_days = State()
