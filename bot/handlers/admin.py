@@ -100,29 +100,46 @@ async def admin_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin:users")
 async def admin_users(callback: CallbackQuery):
+    await _show_users_page(callback, 0)
+
+@router.callback_query(F.data.startswith("admin:users:p:"))
+async def admin_users_paged(callback: CallbackQuery):
+    await _show_users_page(callback, int(callback.data.split(":")[3]))
+
+async def _show_users_page(callback: CallbackQuery, page: int):
     if not is_admin(callback.from_user.id):
         await callback.answer("❌", show_alert=True)
         return
-
+    per = 15
     async with async_session_maker() as session:
         users = await UserRepository(session).get_all_users()
-
     if not users:
         await callback.message.answer("👥 Немає користувачів.")
         await callback.answer()
         return
-
-    text = f"👥 <b>Користувачі ({len(users)})</b>\n\n"
-    for user in users[:20]:
-        premium = "⭐" if user.premium_status else "👤"
-        banned = " 🚫" if user.is_banned else ""
-        admin_mark = " 🔧" if user.telegram_id in settings.admin_ids else ""
-        text += f"{premium} {user.first_name or 'User'} | <code>{user.telegram_id}</code>{banned}{admin_mark}\n"
-
-    if len(users) > 20:
-        text += f"\n<i>...та ще {len(users) - 20}</i>"
-
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+    total = len(users)
+    pages = (total + per - 1) // per
+    page = max(0, min(page, pages - 1))
+    chunk = users[page*per:(page+1)*per]
+    text = f"👥 <b>Користувачі ({total})</b> — {page+1}/{pages}\n\n"
+    for u in chunk:
+        p = "⭐" if u.premium_status else "👤"
+        b = " 🚫" if u.is_banned else ""
+        a = " 🔧" if u.telegram_id in settings.admin_ids else ""
+        text += f"{p} {u.first_name or 'User'} | <code>{u.telegram_id}</code>{b}{a}\n"
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:users:p:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:users:p:{page+1}"))
+    rows = []
+    if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -479,14 +496,13 @@ async def admin_user_id_received(message: Message, state: FSMContext):
         action_text = action_names.get(action, action)
 
         # Зберігаємо дані для підтвердження
-        confirm_key = f"confirm:{action}:{target_id}:{ban_days}:{ban_reason}"
         await state.update_data(
             target_id=target_id,
             ban_reason=ban_reason,
             ban_days=ban_days,
             pending_action=action,
         )
-
+        safe_reason = ban_reason.replace('_','-').replace(':','-')[:20]
         try:
             await message.bot.send_message(
                 MAIN_ADMIN_ID,
@@ -495,7 +511,7 @@ async def admin_user_id_received(message: Message, state: FSMContext):
                 f"🎯 Дія: {action_text}\n"
                 f"👤 Ціль: <code>{target_id}</code>\n\n"
                 f"Підтвердити?",
-                reply_markup=_confirm_keyboard(f"{action}_{target_id}_{ban_days}_{ban_reason.replace(' ', '_')}", message.from_user.id),
+                reply_markup=_confirm_keyboard(f"{action}_{target_id}_{ban_days}_{safe_reason}", message.from_user.id),
                 parse_mode="HTML",
             )
             await message.answer(
@@ -703,48 +719,66 @@ async def admin_premium_days_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin:user_stats")
 async def show_user_stats(callback: CallbackQuery):
-    uid = callback.from_user.id
-    if uid not in settings.admin_ids:
-        await callback.answer("❌ Немає доступу", show_alert=True)
-        return
+    await _show_stats_page(callback, 0)
 
+@router.callback_query(F.data.startswith("admin:ustats:p:"))
+async def show_user_stats_paged(callback: CallbackQuery):
+    await _show_stats_page(callback, int(callback.data.split(":")[3]))
+
+async def _show_stats_page(callback: CallbackQuery, page: int):
+    if callback.from_user.id not in settings.admin_ids:
+        await callback.answer("❌", show_alert=True)
+        return
+    from bot.database.engine import get_redis
+    from datetime import date
+    from sqlalchemy import select, func
+    from bot.models import SearchHistory
+    per = 10
     async with async_session_maker() as session:
         users = await UserRepository(session).get_all_active()
-        if not users:
-            await callback.answer("Немає користувачів", show_alert=True)
-            return
-
-        lines = ["📊 <b>Статистика користувачів</b>\n"]
-        for user in users[:20]:
-            history = await SearchHistoryRepository(session).get_user_history(user.id, limit=9999)
-            search_count = len(history)
-
+    if not users:
+        await callback.answer("Немає користувачів", show_alert=True)
+        return
+    total = len(users)
+    pages = (total + per - 1) // per
+    page = max(0, min(page, pages - 1))
+    chunk = users[page*per:(page+1)*per]
+    try:
+        r = await get_redis()
+    except Exception:
+        r = None
+    lines = [f"📊 <b>Статистика юзерів</b> {page+1}/{pages}\n"]
+    async with async_session_maker() as session:
+        for u in chunk:
             try:
-                from bot.database.engine import get_redis
-                r = await get_redis()
-                from datetime import date
-                chat_count_today = await r.get(f"chat:{user.telegram_id}:{date.today()}")
-                chat_total = await r.get(f"chat_total:{user.telegram_id}")
-                chat_today = int(chat_count_today) if chat_count_today else 0
-                chat_all = int(chat_total) if chat_total else 0
+                res = await session.execute(select(func.count()).select_from(SearchHistory).where(SearchHistory.user_id == u.id))
+                sc = res.scalar_one()
             except Exception:
-                chat_today = 0
-                chat_all = 0
-
-            name = user.first_name or user.username or f"User"
-            status = "⭐" if user.premium_status else "👤"
-            lines.append(
-                f"{status} <b>{name}</b> (<code>{user.telegram_id}</code>)\n"
-                f"   🔍 Пошук: <b>{search_count}</b> раз\n"
-                f"   🤖 AI чат сьогодні: <b>{chat_today}</b> | всього: <b>{chat_all}</b>\n"
-            )
-
+                sc = 0
+            ct = ca = 0
+            if r:
+                try:
+                    v1 = await r.get(f"chat:{u.telegram_id}:{date.today()}")
+                    v2 = await r.get(f"chat_total:{u.telegram_id}")
+                    ct = int(v1) if v1 else 0
+                    ca = int(v2) if v2 else 0
+                except Exception:
+                    pass
+            nm = (u.first_name or u.username or "User")[:12]
+            st = "⭐" if u.premium_status else "👤"
+            lines.append(f"{st} <b>{nm}</b> <code>{u.telegram_id}</code>\n   🔍 <b>{sc}</b> | 🤖 AI: <b>{ca}</b> (сьогодні: {ct})\n")
     text = "\n".join(lines)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Оновити", callback_data="admin:user_stats")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:back")]
-    ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:ustats:p:{page-1}"))
+    nav.append(InlineKeyboardButton(text="🔄", callback_data=f"admin:ustats:p:{page}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:ustats:p:{page+1}"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[nav, [InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")]])
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "admin:broadcast_tag")
@@ -884,3 +918,53 @@ async def send_features(callback: CallbackQuery):
         await asyncio.sleep(0.05)
 
     await callback.answer(f"✅ Відправлено {sent} юзерам!", show_alert=True)
+
+
+@router.callback_query(F.data == "admin:banlist")
+async def admin_banlist(callback: CallbackQuery):
+    await _show_banlist_page(callback, 0)
+
+@router.callback_query(F.data.startswith("admin:banlist:p:"))
+async def admin_banlist_paged(callback: CallbackQuery):
+    await _show_banlist_page(callback, int(callback.data.split(":")[3]))
+
+async def _show_banlist_page(callback: CallbackQuery, page: int):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌", show_alert=True)
+        return
+    from sqlalchemy import select
+    from bot.models import User
+    per = 15
+    async with async_session_maker() as session:
+        res = await session.execute(select(User).where(User.is_banned == True))
+        banned = list(res.scalars().all())
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")]])
+    if not banned:
+        try:
+            await callback.message.edit_text("✅ <b>Банлист порожній</b>", parse_mode="HTML", reply_markup=back_kb)
+        except Exception:
+            await callback.message.answer("✅ Банлист порожній.", reply_markup=back_kb)
+        await callback.answer()
+        return
+    total = len(banned)
+    pages = (total + per - 1) // per
+    page = max(0, min(page, pages - 1))
+    chunk = banned[page*per:(page+1)*per]
+    text = f"🚫 <b>Банлист ({total})</b> — {page+1}/{pages}\n\n"
+    for u in chunk:
+        nm = u.first_name or u.username or "User"
+        text += f"🚫 <b>{nm}</b> | <code>{u.telegram_id}</code>\n"
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:banlist:p:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:banlist:p:{page+1}"))
+    rows = []
+    if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()

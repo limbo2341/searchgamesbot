@@ -116,6 +116,7 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="⭐ Видати Premium", callback_data="admin:give_premium")
     builder.button(text="❌ Забрати Premium", callback_data="admin:remove_premium")
     builder.button(text="🚫 Заблокувати", callback_data="admin:ban")
+    builder.button(text="📋 Банлист", callback_data="admin:banlist")
     builder.button(text="✅ Розблокувати", callback_data="admin:unban")
     builder.button(text="🔴 Вимкнути бота", callback_data="admin:bot:disable")
     builder.button(text="🟢 Увімкнути бота", callback_data="admin:bot:enable")

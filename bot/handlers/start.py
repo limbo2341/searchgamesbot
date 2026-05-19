@@ -52,6 +52,8 @@ async def cmd_start(message: Message, state: FSMContext):
             invited_by=invited_by,
         )
 
+        if not created:
+            await user_repo.check_and_expire_premium(user.telegram_id)
         if created and invited_by:
             ref_repo = ReferralRepository(session)
             inviter = await user_repo.get_by_telegram_id(invited_by)
