@@ -129,28 +129,48 @@ async def process_clarification(message: Message, state: FSMContext):
 
 async def _do_search(message, state, ai, original, lang):
     msg = await message.answer(t("search_searching", lang))
-    keywords = ai.get("keywords") or [original]
+    game_name = ai.get("game_name", "") or (ai.get("keywords", [original])[0] if ai.get("keywords") else original)
+    keywords = ai.get("keywords", [original])
     genres = ai.get("genres", [])
-    game_name = ai.get("game_name", "") or (keywords[0] if keywords else original)
-    platform = ai.get("platform", "")
-    rawg, stores = await asyncio.gather(search_games(keywords, genres, page=1), search_all_stores(game_name, platform), return_exceptions=True)
-    if isinstance(rawg, Exception): rawg = []
-    if isinstance(stores, Exception): stores = []
-    if not rawg and keywords: rawg = await search_games([keywords[0]], [], page=1)
-    if not rawg: rawg = await search_games([original], [], page=1)
-    seen = set()
-    all_games = []
-    for g in list(rawg) + list(stores):
-        n = g.get("name", "").lower()
-        if n not in seen:
-            seen.add(n)
-            all_games.append(g)
+
+    # Будуємо картку з даних AI без RAWG
+    game = {
+        "id": abs(hash(game_name)) % 999999,
+        "name": game_name,
+        "background_image": None,
+        "rating": None,
+        "released": None,
+        "genres": [{"name": g} for g in genres],
+        "platforms": [{"platform": {"name": ai.get("platform", "")}}] if ai.get("platform") else [],
+    }
+
     await msg.delete()
-    if not all_games:
-        await message.answer(t("search_no_results", lang), reply_markup=main_menu_keyboard(lang, is_admin=message.from_user.id in settings.admin_ids, is_premium=False), parse_mode="HTML")
+
+    if not game_name or game_name.strip() == "":
+        await message.answer(t("search_no_results", lang),
+            reply_markup=main_menu_keyboard(lang,
+                is_admin=message.from_user.id in settings.admin_ids,
+                is_premium=False),
+            parse_mode="HTML")
         await state.clear()
         return
-    await _show_games(message, state, all_games, lang, original, keywords, genres)
+
+    await state.update_data(query=original, keywords=keywords, genres=genres, current_page=1)
+    await state.set_state(SearchStates.showing_results)
+
+    async with async_session_maker() as session:
+        from bot.repositories import UserRepository, FavoriteRepository, SearchHistoryRepository
+        user = await UserRepository(session).get_by_telegram_id(message.from_user.id)
+        if user:
+            await SearchHistoryRepository(session).add(
+                user_id=user.id, search_query=original, result_game=game_name)
+        is_fav = await FavoriteRepository(session).is_favorite(user.id, game["id"]) if user else False
+
+    card = format_game_card(game, lang)
+    safe_name = game_name[:25].replace(":", "").strip()
+    kb = game_result_keyboard(str(game["id"])[:20], safe_name, lang, is_fav, 1)
+    await message.answer(card, reply_markup=kb, parse_mode="Markdown")
+
 
 async def _show_games(message, state, games, lang, query, keywords, genres):
     await state.update_data(query=query, keywords=keywords, genres=genres, current_page=1)
@@ -208,7 +228,7 @@ async def search_more(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(t("search_no_results", lang))
         return
     await state.update_data(current_page=page)
-    for game in games[:5]:
+    for game in games[:1]:
         card = format_game_card(game, lang)
         async with async_session_maker() as s:
             u = await UserRepository(s).get_by_telegram_id(callback.from_user.id)
