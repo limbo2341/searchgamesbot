@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
@@ -8,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import settings
 from bot.database import async_session_maker
-from bot.repositories import UserRepository, PaymentRepository, SupportRepository
+from bot.repositories import UserRepository, PaymentRepository, SupportRepository, SearchHistoryRepository, FavoriteRepository
 from bot.keyboards import admin_main_keyboard, admin_payment_keyboard, admin_support_ticket_keyboard
 from bot.states import AdminStates
 
