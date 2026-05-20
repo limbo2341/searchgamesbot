@@ -132,21 +132,18 @@ async def _do_search(message, state, ai, original, lang):
     game_name = ai.get("game_name", "") or (ai.get("keywords", [original])[0] if ai.get("keywords") else original)
     keywords = ai.get("keywords", [original])
     genres = ai.get("genres", [])
+    platform = ai.get("platform", "")
 
-    # Будуємо картку з даних AI без RAWG
-    game = {
-        "id": abs(hash(game_name)) % 999999,
-        "name": game_name,
-        "background_image": None,
-        "rating": None,
-        "released": None,
-        "genres": [{"name": g} for g in genres],
-        "platforms": [{"platform": {"name": ai.get("platform", "")}}] if ai.get("platform") else [],
-    }
+    # Шукаємо в магазинах по назві від AI
+    stores = await search_all_stores(game_name, platform)
+    if not stores and keywords:
+        stores = await search_all_stores(keywords[0], platform)
+    if not stores:
+        stores = await search_all_stores(original, "")
 
     await msg.delete()
 
-    if not game_name or game_name.strip() == "":
+    if not stores:
         await message.answer(t("search_no_results", lang),
             reply_markup=main_menu_keyboard(lang,
                 is_admin=message.from_user.id in settings.admin_ids,
@@ -155,21 +152,7 @@ async def _do_search(message, state, ai, original, lang):
         await state.clear()
         return
 
-    await state.update_data(query=original, keywords=keywords, genres=genres, current_page=1)
-    await state.set_state(SearchStates.showing_results)
-
-    async with async_session_maker() as session:
-        from bot.repositories import UserRepository, FavoriteRepository, SearchHistoryRepository
-        user = await UserRepository(session).get_by_telegram_id(message.from_user.id)
-        if user:
-            await SearchHistoryRepository(session).add(
-                user_id=user.id, search_query=original, result_game=game_name)
-        is_fav = await FavoriteRepository(session).is_favorite(user.id, game["id"]) if user else False
-
-    card = format_game_card(game, lang)
-    safe_name = game_name[:25].replace(":", "").strip()
-    kb = game_result_keyboard(str(game["id"])[:20], safe_name, lang, is_fav, 1)
-    await message.answer(card, reply_markup=kb, parse_mode="Markdown")
+    await _show_games(message, state, stores, lang, original, keywords, genres)
 
 
 async def _show_games(message, state, games, lang, query, keywords, genres):
