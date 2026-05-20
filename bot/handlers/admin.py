@@ -102,6 +102,11 @@ async def admin_stats(callback: CallbackQuery):
 async def admin_users(callback: CallbackQuery):
     await _show_users_page(callback, 0)
 
+@router.callback_query(F.data.startswith("admin:stats:p:"))
+async def admin_stats_paged(callback: CallbackQuery):
+    page = int(callback.data.split(":")[-1])
+    await _show_stats_page(callback, page)
+
 @router.callback_query(F.data.startswith("admin:users:p:"))
 async def admin_users_paged(callback: CallbackQuery):
     await _show_users_page(callback, int(callback.data.split(":")[3]))
@@ -110,39 +115,48 @@ async def _show_users_page(callback: CallbackQuery, page: int):
     if not is_admin(callback.from_user.id):
         await callback.answer("❌", show_alert=True)
         return
+    from sqlalchemy import select, func
+    from bot.models import SearchHistory
     per = 15
     async with async_session_maker() as session:
         users = await UserRepository(session).get_all_users()
+        counts = {}
+        for u in users:
+            res = await session.execute(
+                select(func.count(SearchHistory.id)).where(SearchHistory.user_id == u.id)
+            )
+            counts[u.id] = res.scalar_one()
     if not users:
-        await callback.message.answer("👥 Немає користувачів.")
-        await callback.answer()
+        await callback.answer("Немає користувачів", show_alert=True)
         return
-    total = len(users)
+    users_sorted = sorted(users, key=lambda u: counts.get(u.id, 0), reverse=True)
+    total = len(users_sorted)
     pages = (total + per - 1) // per
     page = max(0, min(page, pages - 1))
-    chunk = users[page*per:(page+1)*per]
-    text = f"👥 <b>Користувачі ({total})</b> — {page+1}/{pages}\n\n"
+    chunk = users_sorted[page*per:(page+1)*per]
+    text = f"👥 <b>Користувачі ({total})</b> — {page+1}/{pages}\n<i>↓ Найактивніші першими</i>\n\n"
     for u in chunk:
         p = "⭐" if u.premium_status else "👤"
         b = " 🚫" if u.is_banned else ""
         a = " 🔧" if u.telegram_id in settings.admin_ids else ""
-        text += f"{p} {u.first_name or 'User'} | <code>{u.telegram_id}</code>{b}{a}\n"
+        sc = counts.get(u.id, 0)
+        text += f"{p} <b>{u.first_name or 'User'}</b> | <code>{u.telegram_id}</code>{b}{a}\n   🔍 {sc} пошуків\n"
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:users:p:{page-1}"))
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin:users:p:{page-1}"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:users:p:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Далі ▶️", callback_data=f"admin:users:p:{page+1}"))
     rows = []
     if nav: rows.append(nav)
-    rows.append([InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")])
+    rows.append([InlineKeyboardButton(text="🔄 Оновити", callback_data=f"admin:users:p:{page}")])
+    rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="admin:back")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
-
-# ── Платежі ──
-
-@router.callback_query(F.data == "admin:payments")
 async def admin_payments(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("❌", show_alert=True)
@@ -723,59 +737,47 @@ async def show_user_stats_paged(callback: CallbackQuery):
     await _show_stats_page(callback, int(callback.data.split(":")[3]))
 
 async def _show_stats_page(callback: CallbackQuery, page: int):
-    if callback.from_user.id not in settings.admin_ids:
+    if not is_admin(callback.from_user.id):
         await callback.answer("❌", show_alert=True)
         return
-    from bot.database.engine import get_redis
-    from datetime import date
     from sqlalchemy import select, func
     from bot.models import SearchHistory
-    per = 10
+    per = 15
     async with async_session_maker() as session:
-        users = await UserRepository(session).get_all_active()
-    if not users:
-        await callback.answer("Немає користувачів", show_alert=True)
-        return
-    total = len(users)
-    pages = (total + per - 1) // per
-    page = max(0, min(page, pages - 1))
-    chunk = users[page*per:(page+1)*per]
-    try:
-        r = await get_redis()
-    except Exception:
-        r = None
-    lines = [f"📊 <b>Статистика юзерів</b> {page+1}/{pages}\n"]
-    async with async_session_maker() as session:
-        for u in chunk:
-            try:
-                res = await session.execute(select(func.count()).select_from(SearchHistory).where(SearchHistory.user_id == u.id))
-                sc = res.scalar_one()
-            except Exception:
-                sc = 0
-            ct = ca = 0
-            if r:
-                try:
-                    v1 = await r.get(f"chat:{u.telegram_id}:{date.today()}")
-                    v2 = await r.get(f"chat_total:{u.telegram_id}")
-                    ct = int(v1) if v1 else 0
-                    ca = int(v2) if v2 else 0
-                except Exception:
-                    pass
-            nm = (u.first_name or u.username or "User")[:12]
-            st = "⭐" if u.premium_status else "👤"
-            lines.append(f"{st} <b>{nm}</b> <code>{u.telegram_id}</code>\n   🔍 <b>{sc}</b> | 🤖 AI: <b>{ca}</b> (сьогодні: {ct})\n")
-    text = "\n".join(lines)
+        users = await UserRepository(session).get_all_users()
+        user_data = []
+        for u in users:
+            res = await session.execute(
+                select(func.count(SearchHistory.id)).where(SearchHistory.user_id == u.id)
+            )
+            cnt = res.scalar_one()
+            user_data.append((u, cnt))
+        user_data.sort(key=lambda x: x[1], reverse=True)
+        total = len(user_data)
+        pages = (total + per - 1) // per
+        page = max(0, min(page, pages - 1))
+        chunk = user_data[page*per:(page+1)*per]
+        text = f"📊 <b>Статистика користувачів ({total})</b> — {page+1}/{pages}\n<i>↓ Найактивніші</i>\n\n"
+        for u, sc in chunk:
+            p = "⭐" if u.premium_status else "👤"
+            b = " 🚫" if u.is_banned else ""
+            text += f"{p} <b>{u.first_name or 'User'}</b> | <code>{u.telegram_id}</code>{b} — 🔍 {sc}\n"
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:ustats:p:{page-1}"))
-    nav.append(InlineKeyboardButton(text="🔄", callback_data=f"admin:ustats:p:{page}"))
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin:stats:p:{page-1}"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:ustats:p:{page+1}"))
-    kb = InlineKeyboardMarkup(inline_keyboard=[nav, [InlineKeyboardButton(text="🔙 Меню", callback_data="admin:back")]])
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+        nav.append(InlineKeyboardButton(text="Далі ▶️", callback_data=f"admin:stats:p:{page+1}"))
+    rows = []
+    if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 Оновити", callback_data=f"admin:stats:p:{page}")])
+    rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="admin:back")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
-@router.callback_query(F.data == "admin:broadcast_tag")
 async def broadcast_tag_start(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     if uid not in settings.admin_ids:
