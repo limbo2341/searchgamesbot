@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from bot.config import settings
 from bot.database import async_session_maker
 from bot.repositories import UserRepository, FavoriteRepository
-from bot.services import search_games, format_game_card
+from bot.services import search_all_stores, format_game_card
 from bot.locales import t
 from bot.keyboards import back_keyboard, game_result_keyboard, main_menu_keyboard
 from bot.states import SearchStates
@@ -140,7 +140,7 @@ async def handle_screenshot(message: Message, state: FSMContext):
         if possible_game:
             keywords = [possible_game] + keywords
 
-        if not keywords or confidence < 0.4:
+        if not keywords or confidence < 0.2:
             await analyzing_msg.delete()
             await message.answer(
                 "🤔 Не вдалось розпізнати гру. Спробуй описати її текстом." if lang == "ua"
@@ -149,7 +149,10 @@ async def handle_screenshot(message: Message, state: FSMContext):
             )
             return
 
-        games = await search_games(keywords)
+        platform = ai_result.get("platform", "")
+        games = await search_all_stores(keywords[0] if keywords else "", platform)
+        if not games and len(keywords) > 1:
+            games = await search_all_stores(keywords[1], platform)
         await analyzing_msg.delete()
 
         if not games:
