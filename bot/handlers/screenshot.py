@@ -160,7 +160,7 @@ async def handle_screenshot(message: Message, state: FSMContext):
             card_text = format_game_card(game, lang)
             async with async_session_maker() as session:
                 u = await UserRepository(session).get_by_telegram_id(message.from_user.id)
-                is_fav = await FavoriteRepository(session).is_favorite(u.id, game["id"])
+                is_fav = await FavoriteRepository(session).is_favorite(u.id, str(game["id"]))
 
             safe_name = game["name"][:25].replace(":", "").strip()
             kb = game_result_keyboard(str(game["id"])[:20], safe_name, lang, is_fav, 1)

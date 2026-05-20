@@ -177,7 +177,7 @@ async def _show_games(message, state, games, lang, query, keywords, genres):
             card = format_game_card(game, lang)
             async with async_session_maker() as s:
                 u = await UserRepository(s).get_by_telegram_id(message.from_user.id)
-                is_fav = await FavoriteRepository(s).is_favorite(u.id, game["id"])
+                is_fav = await FavoriteRepository(s).is_favorite(u.id, str(game["id"]))
             safe_name = game["name"][:25].replace(":", "").strip()
             kb = game_result_keyboard(str(game["id"])[:20], safe_name, lang, is_fav, 1)
             if game.get("background_image"):
@@ -215,7 +215,7 @@ async def search_more(callback: CallbackQuery, state: FSMContext):
         card = format_game_card(game, lang)
         async with async_session_maker() as s:
             u = await UserRepository(s).get_by_telegram_id(callback.from_user.id)
-            is_fav = await FavoriteRepository(s).is_favorite(u.id, game["id"])
+            is_fav = await FavoriteRepository(s).is_favorite(u.id, str(game["id"]))
         safe_name = game["name"][:25].replace(":", "").strip()
         kb = game_result_keyboard(str(game["id"])[:20], safe_name, lang, is_fav, page)
         if game.get("background_image"):

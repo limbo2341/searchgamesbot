@@ -59,7 +59,7 @@ class FavoriteRepository:
     async def remove(self, user_id: int, game_id: str) -> bool:
         result = await self.session.execute(
             select(Favorite)
-            .where(Favorite.user_id == user_id, Favorite.game_id == game_id)
+            .where(Favorite.user_id == user_id, Favorite.game_id == str(game_id))
         )
         fav = result.scalar_one_or_none()
         if fav:
@@ -79,7 +79,7 @@ class FavoriteRepository:
     async def is_favorite(self, user_id: int, game_id: str) -> bool:
         result = await self.session.execute(
             select(Favorite)
-            .where(Favorite.user_id == user_id, Favorite.game_id == game_id)
+            .where(Favorite.user_id == user_id, Favorite.game_id == str(game_id))
         )
         return result.scalar_one_or_none() is not None
 
