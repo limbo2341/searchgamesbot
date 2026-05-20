@@ -732,7 +732,7 @@ async def admin_premium_days_received(message: Message, state: FSMContext):
 async def show_user_stats(callback: CallbackQuery):
     await _show_stats_page(callback, 0)
 
-@router.callback_query(F.data.startswith("admin:ustats:p:"))
+@router.callback_query(F.data.startswith("admin:stats:p:"))
 async def show_user_stats_paged(callback: CallbackQuery):
     await _show_stats_page(callback, int(callback.data.split(":")[3]))
 
